@@ -144,3 +144,53 @@ The current design is intentionally simple for local MVP use. The following chan
 | Message replay / audit | Not needed | Migrate from RabbitMQ to Kafka for event sourcing and replay capability |
 | Job persistence | In-flight jobs lost on Worker restart (re-queued via RabbitMQ) | Outbox pattern ensures no job is lost even if both API and queue are temporarily unavailable |
 | Backpressure | Queue grows unbounded | Cap queue size, return HTTP 429 when limit reached |
+| File storage | Local disk | AWS S3 or Azure Blob Storage (see below) |
+
+---
+
+### File Storage at Scale
+
+In the local MVP, uploaded files are stored on the local filesystem. When deployed to a cloud environment, file storage should be migrated to an object store:
+
+- **AWS S3** — store raw uploaded files under a structured key prefix (e.g., `uploads/{session_id}/{filename}`)
+- **Azure Blob Storage** — equivalent option depending on cloud provider
+
+Both the API Service (write) and Worker Service (read) reference files via their storage path recorded in the `File` table. Switching to object storage requires only updating the read/write layer — no changes to the queue or processing logic.
+
+---
+
+### RabbitMQ Failure Handling
+
+If RabbitMQ becomes unavailable, two problems arise simultaneously:
+
+- **API Service (Producer):** Cannot publish jobs → uploads succeed but jobs are silently lost
+- **Worker Service (Consumer):** Loses connection → processing stops entirely
+
+#### Solution: Outbox Pattern *(evaluated, not implemented in this version)*
+
+> The Outbox Pattern was considered as a solution for RabbitMQ failure resilience. While it provides strong guarantees around job durability, it adds significant implementation complexity and is deferred from the current scope. The analysis is documented here for future reference.
+
+To prevent job loss when RabbitMQ is down, the API Service writes the job to PostgreSQL first before publishing:
+
+```
+API Service:
+  INSERT Job (status: pending)        ← atomic with file record
+  Publish to RabbitMQ
+    Success → UPDATE Job (status: queued)
+    Fail    → job stays as pending in DB
+
+Outbox Poller (background process in API Service):
+  SELECT Jobs WHERE status = 'pending'
+  Retry publish to RabbitMQ
+    Success → UPDATE Job (status: queued)
+```
+
+When RabbitMQ recovers, the Outbox Poller automatically flushes all pending jobs — no jobs are lost regardless of how long the outage lasts.
+
+#### Worker Reconnection
+
+The Worker Service implements connection retry with exponential backoff. When RabbitMQ recovers, the Worker reconnects automatically and resumes consuming from where it left off. RabbitMQ retains all durable messages during the outage.
+
+#### Tradeoff
+
+The Outbox Poller introduces a small delay between RabbitMQ recovery and job dispatch (one polling interval). This is acceptable for a file processing workload where near-real-time is not required. For lower latency, PostgreSQL `LISTEN/NOTIFY` can be used to wake the Poller immediately instead of polling on a fixed interval.
