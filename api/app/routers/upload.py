@@ -1,10 +1,11 @@
 import uuid
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.exceptions import SessionNotFoundError
 from app.models.db import Job, Session
 from app.models.schemas import SessionStatusResponse, UploadResponse
 from app.services.queue_service import publish_job
@@ -13,11 +14,11 @@ from app.services.upload_service import process_upload
 router = APIRouter(prefix="/api", tags=["upload"])
 
 
-@router.post("/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_files(
     files: list[UploadFile],
     db: AsyncSession = Depends(get_db),
-):
+) -> UploadResponse:
     session, job = await process_upload(files, db)
     await publish_job(job.job_id, session.session_id)
 
@@ -34,14 +35,15 @@ async def upload_files(
 async def get_session_status(
     session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-):
+) -> SessionStatusResponse:
     session = await db.get(Session, session_id)
-    if not session:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Session not found")
+    if session is None:
+        raise SessionNotFoundError(str(session_id))
 
     result = await db.execute(
-        select(Job).where(Job.session_id == session_id).order_by(Job.queued_at.desc())
+        select(Job)
+        .where(Job.session_id == session_id)
+        .order_by(Job.queued_at.desc())
     )
     job = result.scalar_one_or_none()
 
