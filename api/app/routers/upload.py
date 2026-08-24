@@ -11,7 +11,7 @@ from app.models.schemas import SessionStatusResponse, UploadResponse
 from app.services.queue_service import publish_job
 from app.services.upload_service import process_upload
 
-router = APIRouter(prefix="/api", tags=["upload"])
+router = APIRouter(tags=["upload"])
 
 
 @router.post("/upload", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
