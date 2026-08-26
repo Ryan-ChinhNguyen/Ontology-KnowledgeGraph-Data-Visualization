@@ -8,10 +8,18 @@ from dataclasses import dataclass
 from fastapi import UploadFile
 from ontology_shared.models import File, FileFormat, Job, Session, SessionStatus
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.exceptions import DuplicateFileError, EmptyFileError, FileTooLargeError
+from app.exceptions import (
+    ApiError,
+    DuplicateFileError,
+    DuplicateFilenameError,
+    EmptyFileError,
+    FileTooLargeError,
+    UploadConflictError,
+)
 from app.services.storage import FileStorage
 from app.services.validation import safe_filename, validate_upload
 
@@ -94,6 +102,23 @@ async def _prepare_files(files: list[UploadFile], db: AsyncSession) -> PreparedB
     return PreparedBatch(files=prepared, total_bytes=total_bytes)
 
 
+def _as_domain_error(error: IntegrityError, batch: PreparedBatch) -> ApiError:
+    """Translate a constraint violation into the rule the user broke.
+
+    The violated constraint is named in the driver's error, which is more
+    reliable than re-querying to work out what collided.
+    """
+    detail = str(error.orig)
+
+    if "uq_files_sha256_hash" in detail:
+        return DuplicateFileError(batch.files[0].filename)
+    if "uq_files_session_filename" in detail:
+        return DuplicateFilenameError(batch.files[0].filename)
+
+    log.error("Unmapped integrity error on upload: %s", detail)
+    return UploadConflictError()
+
+
 def _build_session(file_format: FileFormat, batch: PreparedBatch) -> Session:
     """Build the Session row.
 
@@ -140,7 +165,13 @@ async def process_upload(
     job = Job(job_id=uuid.uuid4(), session_id=session.session_id)
     db.add(job)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as error:
+        # A concurrent upload of the same bytes can pass the pre-check above and
+        # only collide here, where the unique constraint settles it.
+        await db.rollback()
+        raise _as_domain_error(error, batch) from error
 
     log.info(
         "Upload stored: session_id=%s format=%s files=%d bytes=%d",

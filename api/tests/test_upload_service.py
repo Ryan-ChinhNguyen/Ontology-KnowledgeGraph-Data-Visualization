@@ -6,7 +6,15 @@ import pytest
 from fastapi import UploadFile
 from ontology_shared.models import FileFormat, SessionStatus
 
-from app.exceptions import DuplicateFileError, EmptyFileError, FileTooLargeError
+from sqlalchemy.exc import IntegrityError
+
+from app.exceptions import (
+    DuplicateFileError,
+    DuplicateFilenameError,
+    EmptyFileError,
+    FileTooLargeError,
+    UploadConflictError,
+)
 from app.services.upload_service import process_upload
 from tests.conftest import InMemoryStorage
 
@@ -89,6 +97,48 @@ class TestProcessUpload:
 
         with pytest.raises(DuplicateFileError):
             await process_upload([upload("again.csv", content)], db, storage)
+
+    async def test_reports_a_concurrent_duplicate_as_a_conflict(
+        self, db: AsyncMock, storage: InMemoryStorage
+    ) -> None:
+        """Two uploads of the same bytes can both pass the pre-check; the one
+        that loses the race must still get a clear error, not a 500."""
+        db.commit.side_effect = IntegrityError(
+            statement="INSERT INTO files ...",
+            params={},
+            orig=Exception('duplicate key value violates unique constraint "uq_files_sha256_hash"'),
+        )
+
+        with pytest.raises(DuplicateFileError):
+            await process_upload([upload("people.csv")], db, storage)
+
+        db.rollback.assert_awaited_once()
+
+    async def test_reports_a_filename_collision_as_a_conflict(
+        self, db: AsyncMock, storage: InMemoryStorage
+    ) -> None:
+        db.commit.side_effect = IntegrityError(
+            statement="INSERT INTO files ...",
+            params={},
+            orig=Exception(
+                'duplicate key value violates unique constraint "uq_files_session_filename"'
+            ),
+        )
+
+        with pytest.raises(DuplicateFilenameError):
+            await process_upload([upload("people.csv")], db, storage)
+
+    async def test_reports_an_unrecognised_constraint_as_a_conflict(
+        self, db: AsyncMock, storage: InMemoryStorage
+    ) -> None:
+        db.commit.side_effect = IntegrityError(
+            statement="INSERT INTO sessions ...",
+            params={},
+            orig=Exception('violates check constraint "ck_sessions_total_files_positive"'),
+        )
+
+        with pytest.raises(UploadConflictError):
+            await process_upload([upload("people.csv")], db, storage)
 
     async def test_writes_nothing_when_validation_fails(
         self, db: AsyncMock, storage: InMemoryStorage

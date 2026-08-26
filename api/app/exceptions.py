@@ -66,6 +66,15 @@ class DuplicateFileError(ApiError):
         super().__init__(f"File '{filename}' has already been uploaded")
 
 
+class UploadConflictError(ApiError):
+    """A constraint rejected the upload and no more specific rule matched."""
+
+    status_code = status.HTTP_409_CONFLICT
+
+    def __init__(self) -> None:
+        super().__init__("Upload conflicts with existing data")
+
+
 class SessionNotFoundError(ApiError):
     status_code = status.HTTP_404_NOT_FOUND
 
