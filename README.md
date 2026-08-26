@@ -97,7 +97,20 @@ Three options were considered: PostgreSQL LISTEN/NOTIFY, RabbitMQ, and Kafka.
 | Lightweight | Easy to run locally via Docker |
 | Flexible routing | Exchanges support future Bulkhead pattern (separate queues per format) |
 
-**Tradeoff:** RabbitMQ does not retain messages after consumption. If audit log or message replay is needed in the future, Kafka would be the better fit.
+**Tradeoff:** The classic queue used for jobs deletes a message once it is acknowledged, so the queue itself is not a history of what ran.
+
+This costs less than it appears, because the `jobs` table already records every job with its status, attempt count, error message, and timestamps. Auditing is a query against that table, and replaying is selecting rows from it and publishing them again — which is safe precisely because the Worker's idempotency check makes a repeated message a no-op.
+
+What the `jobs` table does *not* keep is history at the level of individual events: it holds the current state of a job, so an error from an earlier attempt is overwritten by the next one. Should that history be needed, the answer is not a different broker — RabbitMQ **stream queues** (`x-queue-type: stream`) are append-only logs with non-destructive reads, consumer-tracked offsets, and age- or size-based retention. A stream would run alongside the existing classic queue rather than replacing it:
+
+| Queue | Type | Purpose |
+|-------|------|---------|
+| `job_queue` | classic | Distributing work — competing consumers, per-message ack, dead-lettering, retry |
+| `job_events` | stream | Event history — replay, audit, and consumers that need to read the past |
+
+Note that RabbitMQ's `x-message-ttl` is not equivalent to Kafka's retention: it bounds how long an **unconsumed** message may wait before being discarded, whereas retention on a log guarantees how long a message stays available **after** being read. Stream queues provide the latter; classic queues do not.
+
+Kafka would only become the better fit at throughputs far above this workload, or if its stream-processing ecosystem (Kafka Streams, Connect) were needed.
 
 ---
 
@@ -141,7 +154,7 @@ The current design is intentionally simple for local MVP use. The following chan
 |---------|-----|----------|
 | Worker concurrency | Single worker instance | Multiple Worker instances consuming from the same queue |
 | Queue isolation | Single job queue | Separate queues per file format (Bulkhead pattern) — slow SQL parsing does not delay CSV parsing |
-| Message replay / audit | Not needed | Migrate from RabbitMQ to Kafka for event sourcing and replay capability |
+| Message replay / audit | Served by the `jobs` table | Add a RabbitMQ stream queue alongside the job queue for event-level history — no change of broker |
 | Job persistence | In-flight jobs lost on Worker restart (re-queued via RabbitMQ) | Outbox pattern ensures no job is lost even if both API and queue are temporarily unavailable |
 | Backpressure | Queue grows unbounded | Cap queue size, return HTTP 429 when limit reached |
 | File storage | Local disk | AWS S3 or Azure Blob Storage (see below) |
