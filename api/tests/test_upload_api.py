@@ -1,5 +1,5 @@
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from httpx import AsyncClient
 from ontology_shared.models import JobStatus, SessionStatus
@@ -163,8 +163,59 @@ class TestSessionStatusEndpoint:
         assert response.status_code == 422
 
 
-class TestHealthEndpoint:
-    async def test_reports_ok(self, client: AsyncClient) -> None:
-        response = await client.get("/health")
+class TestHealthEndpoints:
+    async def test_liveness_ignores_dependencies(self, client: AsyncClient) -> None:
+        """Liveness must stay green while dependencies are down, or an outage
+        would get the process restarted instead of waited out."""
+        with (
+            patch("app.main.broker.is_ready", new_callable=AsyncMock, return_value=False),
+            patch("app.main._postgres_reachable", new_callable=AsyncMock, return_value=False),
+        ):
+            response = await client.get("/health")
+
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+    async def test_readiness_is_green_when_everything_is_reachable(
+        self, client: AsyncClient
+    ) -> None:
+        with (
+            patch("app.main.broker.is_ready", new_callable=AsyncMock, return_value=True),
+            patch("app.main._postgres_reachable", new_callable=AsyncMock, return_value=True),
+        ):
+            response = await client.get("/health/ready")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ready": True,
+            "dependencies": {"postgres": True, "rabbitmq": True},
+        }
+
+    async def test_readiness_names_the_dependency_that_is_down(
+        self, client: AsyncClient
+    ) -> None:
+        with (
+            patch("app.main.broker.is_ready", new_callable=AsyncMock, return_value=False),
+            patch("app.main._postgres_reachable", new_callable=AsyncMock, return_value=True),
+        ):
+            response = await client.get("/health/ready")
+
+        assert response.status_code == 503
+        assert response.json()["dependencies"] == {"postgres": True, "rabbitmq": False}
+
+
+class TestQueueOutage:
+    async def test_upload_reports_503_when_the_broker_is_down(
+        self, client: AsyncClient
+    ) -> None:
+        from app.exceptions import QueueUnavailableError
+
+        with patch(
+            "app.routers.upload.publish_job",
+            new_callable=AsyncMock,
+            side_effect=QueueUnavailableError(),
+        ):
+            response = await client.post("/api/upload", files=[csv_part()])
+
+        assert response.status_code == 503
+        assert "unavailable" in response.json()["detail"]

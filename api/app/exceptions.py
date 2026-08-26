@@ -75,6 +75,15 @@ class UploadConflictError(ApiError):
         super().__init__("Upload conflicts with existing data")
 
 
+class QueueUnavailableError(ApiError):
+    """The upload was stored but could not be handed to the Worker."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    def __init__(self) -> None:
+        super().__init__("Job queue is unavailable; the upload will be retried automatically")
+
+
 class SessionNotFoundError(ApiError):
     status_code = status.HTTP_404_NOT_FOUND
 
