@@ -97,20 +97,22 @@ Three options were considered: PostgreSQL LISTEN/NOTIFY, RabbitMQ, and Kafka.
 | Lightweight | Easy to run locally via Docker |
 | Flexible routing | Exchanges support future Bulkhead pattern (separate queues per format) |
 
-**Tradeoff:** The classic queue used for jobs deletes a message once it is acknowledged, so the queue itself is not a history of what ran.
+**Tradeoffs accepted:**
 
-This costs less than it appears, because the `jobs` table already records every job with its status, attempt count, error message, and timestamps. Auditing is a query against that table, and replaying is selecting rows from it and publishing them again — which is safe precisely because the Worker's idempotency check makes a repeated message a no-op.
+| Tradeoff | Detail |
+|----------|--------|
+| Not an event log | A classic queue deletes each message on acknowledgment, so the queue is not a record of what ran |
+| No replay from the queue | An acknowledged message cannot be re-read — there is no offset to rewind to |
+| Lower throughput | Tens of thousands of messages per second, against millions for Kafka |
+| Harder to scale horizontally | Kafka shards a topic into partitions and gains parallelism by adding them; a RabbitMQ queue is one logical unit, scaled by adding competing consumers or by splitting into several queues by hand |
 
-What the `jobs` table does *not* keep is history at the level of individual events: it holds the current state of a job, so an error from an earlier attempt is overwritten by the next one. Should that history be needed, the answer is not a different broker — RabbitMQ **stream queues** (`x-queue-type: stream`) are append-only logs with non-destructive reads, consumer-tracked offsets, and age- or size-based retention. A stream would run alongside the existing classic queue rather than replacing it:
+**How this project works around them**
 
-| Queue | Type | Purpose |
-|-------|------|---------|
-| `job_queue` | classic | Distributing work — competing consumers, per-message ack, dead-lettering, retry |
-| `job_events` | stream | Event history — replay, audit, and consumers that need to read the past |
+History and replay come from PostgreSQL rather than from the broker. The `jobs` table records every job with its status, attempt count, error, and timestamps, so auditing is a query against that table and replaying is selecting rows from it and publishing them again — safe because the Worker's idempotency check makes a repeated message a no-op. This is a mechanism built here, not something RabbitMQ provides.
 
-Note that RabbitMQ's `x-message-ttl` is not equivalent to Kafka's retention: it bounds how long an **unconsumed** message may wait before being discarded, whereas retention on a log guarantees how long a message stays available **after** being read. Stream queues provide the latter; classic queues do not.
+Its limit is that `jobs` holds current state, not event-level history: an earlier attempt's error is overwritten by the next. Should that history be needed, RabbitMQ **stream queues** (`x-queue-type: stream`) are append-only logs with non-destructive reads and age- or size-based retention, and would run alongside the classic job queue rather than replace it. Note that `x-message-ttl` is not equivalent — it bounds how long an *unconsumed* message may wait before being discarded, whereas log retention guarantees availability *after* reading.
 
-Kafka would only become the better fit at throughputs far above this workload, or if its stream-processing ecosystem (Kafka Streams, Connect) were needed.
+The remaining two tradeoffs are not worked around because they are not reached: the workload is a handful of 20MB uploads, and per-format queues (Bulkhead) cover the foreseeable scaling need.
 
 ---
 
