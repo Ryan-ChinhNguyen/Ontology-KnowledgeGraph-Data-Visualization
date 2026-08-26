@@ -1,83 +1,165 @@
-import re
+"""Reads a PostgreSQL dump.
+
+The dump is parsed, never executed: statements are turned into an AST and read
+for structure, so ``DROP``, ``TRUNCATE``, and shell escapes in an uploaded file
+have no effect beyond being skipped.
+"""
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import sqlglot
-import sqlglot.expressions as exp
+from sqlglot import expressions as exp
 
 from app.parsers.base import BaseParser, Column, NormalizedData, Relationship, Table
 
+log = logging.getLogger(__name__)
 
-DANGEROUS_STATEMENTS = (exp.Drop, exp.Command, exp.Use, exp.Set)
+DIALECT = "postgres"
+
+#: Statement types carrying no schema or row information. Skipping them also
+#: means a destructive statement is never interpreted.
+IGNORED_STATEMENTS = (exp.Drop, exp.Command, exp.Use, exp.Set, exp.Alter)
+
+UNKNOWN_TYPE = "unknown"
+
+
+@dataclass
+class _ParseState:
+    """Accumulates the dump's contents across statements and files.
+
+    ``declared_columns`` caches each table's column names so that an
+    ``INSERT`` without a column list does not rebuild them every time — dumps
+    written with ``pg_dump --inserts`` emit one such statement per row.
+    """
+
+    tables: dict[str, Table] = field(default_factory=dict)
+    foreign_keys: list[Relationship] = field(default_factory=list)
+    declared_columns: dict[str, list[str]] = field(default_factory=dict)
 
 
 class SqlParser(BaseParser):
     def parse(self, file_paths: list[str]) -> NormalizedData:
-        tables: dict[str, Table] = {}
-        relationships: list[Relationship] = []
+        state = _ParseState()
 
         for path in file_paths:
-            with open(path, encoding="utf-8") as f:
-                sql = f.read()
+            statements = sqlglot.parse(
+                Path(path).read_text(encoding="utf-8"),
+                dialect=DIALECT,
+                error_level=sqlglot.ErrorLevel.WARN,
+            )
+            for statement in statements:
+                self._apply(statement, state)
 
-            statements = sqlglot.parse(sql, dialect="postgres", error_level=sqlglot.ErrorLevel.WARN)
+        # Applied after every CREATE has been seen, so a foreign key declared
+        # before its target table still resolves.
+        for relationship in state.foreign_keys:
+            table = state.tables.get(relationship.from_table)
+            if table is not None:
+                table.relationships.append(relationship)
 
-            for stmt in statements:
-                if stmt is None or isinstance(stmt, DANGEROUS_STATEMENTS):
-                    continue
+        return NormalizedData(tables=list(state.tables.values()))
 
-                if isinstance(stmt, exp.Create) and isinstance(stmt.this, exp.Schema):
-                    table_name, columns, fks = self._parse_create(stmt)
-                    tables[table_name] = Table(name=table_name, columns=columns)
-                    relationships.extend(fks)
+    def _apply(self, statement: exp.Expression | None, state: _ParseState) -> None:
+        if statement is None or isinstance(statement, IGNORED_STATEMENTS):
+            return
 
-                elif isinstance(stmt, exp.Insert):
-                    table_name, rows = self._parse_insert(stmt)
-                    if table_name in tables:
-                        tables[table_name].rows.extend(rows)
+        if isinstance(statement, exp.Create) and isinstance(statement.this, exp.Schema):
+            table = self._read_create(statement, state.foreign_keys)
+            state.tables[table.name] = table
+            state.declared_columns[table.name] = [column.name for column in table.columns]
+            return
 
-        for rel in relationships:
-            if rel.from_table in tables:
-                tables[rel.from_table].relationships.append(rel)
+        if isinstance(statement, exp.Insert):
+            self._read_insert(statement, state)
 
-        return NormalizedData(tables=list(tables.values()))
-
-    def _parse_create(self, stmt: exp.Create) -> tuple[str, list[Column], list[Relationship]]:
-        schema = stmt.this
+    def _read_create(self, statement: exp.Create, foreign_keys: list[Relationship]) -> Table:
+        schema: exp.Schema = statement.this
         table_name = schema.this.name
-        columns = []
-        fks = []
 
-        for col_def in schema.expressions:
-            if isinstance(col_def, exp.ColumnDef):
-                columns.append(Column(
-                    name=col_def.name,
-                    inferred_type=col_def.args.get("kind", "unknown").sql() if col_def.args.get("kind") else "unknown",
-                ))
-            elif isinstance(col_def, exp.ForeignKey):
-                fk_cols = [c.name for c in col_def.find_all(exp.Column)]
-                ref = col_def.args.get("reference")
-                if ref:
-                    ref_table = ref.find(exp.Table)
-                    if ref_table:
-                        fks.append(Relationship(
-                            from_table=table_name,
-                            to_table=ref_table.name,
-                            type="FOREIGN_KEY",
-                        ))
+        columns: list[Column] = []
+        for definition in schema.expressions:
+            if isinstance(definition, exp.ColumnDef):
+                columns.append(Column(name=definition.name, inferred_type=self._type_of(definition)))
+            elif isinstance(definition, exp.ForeignKey):
+                target = self._foreign_key_target(definition)
+                if target:
+                    foreign_keys.append(
+                        Relationship(from_table=table_name, to_table=target, type="FOREIGN_KEY")
+                    )
 
-        return table_name, columns, fks
+        return Table(name=table_name, columns=columns)
 
-    def _parse_insert(self, stmt: exp.Insert) -> tuple[str, list[dict]]:
-        table_name = stmt.this.name if stmt.this else "unknown"
-        rows = []
+    def _type_of(self, definition: exp.ColumnDef) -> str:
+        kind = definition.args.get("kind")
+        return kind.sql(dialect=DIALECT) if kind else UNKNOWN_TYPE
 
-        values_clause = stmt.args.get("expression")
-        if isinstance(values_clause, exp.Values):
-            cols = [c.name for c in stmt.args.get("this", exp.Schema()).expressions] if stmt.args.get("this") else []
-            for tuple_expr in values_clause.expressions:
-                vals = [v.this if hasattr(v, "this") else str(v) for v in tuple_expr.expressions]
-                if cols:
-                    rows.append(dict(zip(cols, vals)))
-                else:
-                    rows.append({str(i): v for i, v in enumerate(vals)})
+    def _foreign_key_target(self, definition: exp.ForeignKey) -> str | None:
+        reference = definition.args.get("reference")
+        if reference is None:
+            return None
+        target = reference.find(exp.Table)
+        return target.name if target else None
 
-        return table_name, rows
+    def _read_insert(self, statement: exp.Insert, state: _ParseState) -> None:
+        """Attach rows to an already-declared table.
+
+        Rows for a table with no CREATE are dropped: without the column list
+        there is nothing meaningful to key the values by.
+        """
+        values = statement.args.get("expression")
+        if not isinstance(values, exp.Values):
+            return
+
+        destination = self._insert_target(statement)
+        if destination is None:
+            return
+        table_name, listed_columns = destination
+
+        target = state.tables.get(table_name)
+        if target is None:
+            log.warning("Skipping INSERT for undeclared table '%s'", table_name)
+            return
+
+        column_names = listed_columns or state.declared_columns.get(table_name, [])
+        for tuple_expression in values.expressions:
+            literals = [self._literal(value) for value in tuple_expression.expressions]
+            target.rows.append(dict(zip(column_names, literals)))
+
+    def _insert_target(self, statement: exp.Insert) -> tuple[str, list[str]] | None:
+        """Read the destination table and its column list off the statement.
+
+        Both live directly under ``this``, so they are read in constant time
+        rather than by searching the statement — whose ``VALUES`` subtree grows
+        with the number of rows being inserted.
+        """
+        destination = statement.this
+
+        if isinstance(destination, exp.Schema):
+            table = destination.this
+            columns = [column.name for column in destination.expressions]
+        elif isinstance(destination, exp.Table):
+            table, columns = destination, []
+        else:
+            return None
+
+        return (table.name, columns) if isinstance(table, exp.Table) else None
+
+    def _literal(self, value: exp.Expression) -> object:
+        if isinstance(value, exp.Null):
+            return None
+        if isinstance(value, exp.Boolean):
+            return value.this
+        if isinstance(value, exp.Literal):
+            return value.this if value.is_string else self._number(value.this)
+        return value.sql(dialect=DIALECT)
+
+    def _number(self, raw: str) -> object:
+        try:
+            return int(raw)
+        except ValueError:
+            try:
+                return float(raw)
+            except ValueError:
+                return raw

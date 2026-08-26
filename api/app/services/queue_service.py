@@ -1,40 +1,30 @@
-import json
+import logging
 import uuid
 
 import aio_pika
+from ontology_shared.messaging import JOB_QUEUE, JobMessage
 
-from app.core.config import settings
+from app.core.rabbitmq import broker
 
-QUEUE_NAME = "job_queue"
-DEAD_QUEUE_NAME = "dead_queue"
+log = logging.getLogger(__name__)
 
 
 async def publish_job(job_id: uuid.UUID, session_id: uuid.UUID) -> None:
-    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-    async with connection:
-        channel = await connection.channel()
+    """Hand a job to the Worker.
 
-        dead_queue = await channel.declare_queue(DEAD_QUEUE_NAME, durable=True)
+    The message is persistent and the queue durable, so a broker restart does
+    not drop queued work.
+    """
+    message = JobMessage(job_id=job_id, session_id=session_id)
 
-        queue = await channel.declare_queue(
-            QUEUE_NAME,
-            durable=True,
-            arguments={
-                "x-dead-letter-exchange": "",
-                "x-dead-letter-routing-key": dead_queue.name,
-            },
-        )
-
-        message_body = json.dumps({
-            "job_id": str(job_id),
-            "session_id": str(session_id),
-            "attempt": 0,
-        }).encode()
-
+    async with broker.channel() as channel:
         await channel.default_exchange.publish(
             aio_pika.Message(
-                body=message_body,
+                body=message.encode(),
+                content_type="application/json",
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             ),
-            routing_key=queue.name,
+            routing_key=JOB_QUEUE,
         )
+
+    log.info("Job published: job_id=%s session_id=%s", job_id, session_id)

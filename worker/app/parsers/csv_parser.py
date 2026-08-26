@@ -1,26 +1,15 @@
-from pathlib import Path
-
 import pandas as pd
 
-from app.parsers.base import BaseParser, Column, NormalizedData, Table
+from app.parsers.dataframe import DataFrameParser
+
+#: ``utf-8-sig`` strips the byte-order mark that Excel prepends when saving as
+#: CSV on Windows, which would otherwise corrupt the first column's name.
+CSV_ENCODING = "utf-8-sig"
 
 
-class CsvParser(BaseParser):
-    def __init__(self, delimiter: str = ","):
-        self.delimiter = delimiter
+class CsvParser(DataFrameParser):
+    def __init__(self, delimiter: str = ",") -> None:
+        self._delimiter = delimiter
 
-    def parse(self, file_paths: list[str]) -> NormalizedData:
-        tables = []
-        for path in file_paths:
-            table_name = Path(path).stem
-            df = pd.read_csv(path, sep=self.delimiter, encoding="utf-8-sig")
-
-            columns = [
-                Column(name=col, inferred_type=str(df[col].dtype))
-                for col in df.columns
-            ]
-            rows = df.where(pd.notna(df), None).to_dict(orient="records")
-
-            tables.append(Table(name=table_name, columns=columns, rows=rows))
-
-        return NormalizedData(tables=tables)
+    def read_frame(self, path: str) -> pd.DataFrame:
+        return pd.read_csv(path, sep=self._delimiter, encoding=CSV_ENCODING)

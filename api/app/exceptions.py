@@ -1,65 +1,73 @@
+"""Domain errors raised by the upload flow.
+
+Each error names one rejection reason and owns its HTTP status, so services
+raise a meaningful error and never assemble status codes inline.
+"""
+
 from fastapi import HTTPException, status
 
 
-class InvalidFileExtensionError(HTTPException):
-    def __init__(self, ext: str) -> None:
-        super().__init__(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file extension: .{ext}",
-        )
+class ApiError(HTTPException):
+    """Base for the service's errors. Subclasses set ``status_code`` once as a
+    class attribute and pass only the message."""
+
+    status_code: int = status.HTTP_400_BAD_REQUEST
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=self.status_code, detail=detail)
 
 
-class EmptyFileError(HTTPException):
+class NoFilesProvidedError(ApiError):
+    def __init__(self) -> None:
+        super().__init__("At least one file is required")
+
+
+class TooManyFilesError(ApiError):
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"At most {limit} files may be uploaded at once")
+
+
+class DuplicateFilenameError(ApiError):
     def __init__(self, filename: str) -> None:
-        super().__init__(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File '{filename}' is empty",
-        )
+        super().__init__(f"Duplicate filename in upload: '{filename}'")
 
 
-class MixedFormatsError(HTTPException):
+class InvalidFilenameError(ApiError):
+    def __init__(self, filename: str) -> None:
+        super().__init__(f"Invalid filename: '{filename}'")
+
+
+class InvalidFileExtensionError(ApiError):
+    def __init__(self, extension: str) -> None:
+        super().__init__(f"Unsupported file extension: '.{extension}'")
+
+
+class MixedFormatsError(ApiError):
     def __init__(self) -> None:
-        super().__init__(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Mixed file formats are not allowed",
-        )
+        super().__init__("All files in one upload must share the same format")
 
 
-class DuplicateFilenameError(HTTPException):
-    def __init__(self) -> None:
-        super().__init__(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Duplicate filenames in upload",
-        )
+class EmptyFileError(ApiError):
+    def __init__(self, filename: str) -> None:
+        super().__init__(f"File '{filename}' is empty")
 
 
-class TooManyFilesError(HTTPException):
-    def __init__(self, max_files: int) -> None:
-        super().__init__(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Max {max_files} files per upload",
-        )
+class FileTooLargeError(ApiError):
+    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
 
-
-class FileTooLargeError(HTTPException):
     def __init__(self, limit_mb: int) -> None:
-        super().__init__(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Total file size exceeds {limit_mb}MB limit",
-        )
+        super().__init__(f"Total upload size exceeds the {limit_mb}MB limit")
 
 
-class DuplicateFileError(HTTPException):
-    def __init__(self) -> None:
-        super().__init__(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="File with this content already exists",
-        )
+class DuplicateFileError(ApiError):
+    status_code = status.HTTP_409_CONFLICT
+
+    def __init__(self, filename: str) -> None:
+        super().__init__(f"File '{filename}' has already been uploaded")
 
 
-class SessionNotFoundError(HTTPException):
+class SessionNotFoundError(ApiError):
+    status_code = status.HTTP_404_NOT_FOUND
+
     def __init__(self, session_id: str) -> None:
-        super().__init__(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session '{session_id}' not found",
-        )
+        super().__init__(f"Session '{session_id}' not found")

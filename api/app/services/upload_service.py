@@ -1,113 +1,152 @@
+"""Turns an accepted upload into a Session, its File rows, and a queued Job."""
+
 import hashlib
-from datetime import datetime, timezone
-from pathlib import Path
+import logging
+import uuid
+from dataclasses import dataclass
 
 from fastapi import UploadFile
+from ontology_shared.models import File, FileFormat, Job, Session, SessionStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.exceptions import (
-    DuplicateFileError,
-    DuplicateFilenameError,
-    EmptyFileError,
-    FileTooLargeError,
-    InvalidFileExtensionError,
-    MixedFormatsError,
-    TooManyFilesError,
-)
-from app.models.db import File, FileFormat, Job, Session, SessionStatus
+from app.exceptions import DuplicateFileError, EmptyFileError, FileTooLargeError
+from app.services.storage import FileStorage
+from app.services.validation import safe_filename, validate_upload
 
-ALLOWED_EXTENSIONS: dict[str, FileFormat] = {
-    "csv": FileFormat.csv,
-    "tsv": FileFormat.csv,
-    "json": FileFormat.json,
-    "sql": FileFormat.sql,
-    "parquet": FileFormat.parquet,
-}
-
-MAX_BYTES = settings.max_file_size_mb * 1024 * 1024
+log = logging.getLogger(__name__)
 
 
-def get_format(filename: str) -> FileFormat:
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise InvalidFileExtensionError(ext)
-    return ALLOWED_EXTENSIONS[ext]
+@dataclass(frozen=True)
+class PreparedFile:
+    """An upload that passed validation, held in memory until the Session row
+    exists to group it under."""
+
+    filename: str
+    content: bytes
+    sha256: str
+
+    @property
+    def size_bytes(self) -> int:
+        return len(self.content)
 
 
-def validate_tier0(files: list[UploadFile]) -> None:
-    if len(files) > settings.max_files_per_session:
-        raise TooManyFilesError(settings.max_files_per_session)
+@dataclass(frozen=True)
+class PreparedBatch:
+    """The whole upload, with the total already accumulated while reading so
+    it is not summed a second time."""
 
-    filenames = [f.filename for f in files]
-    if len(filenames) != len(set(filenames)):
-        raise DuplicateFilenameError()
-
-    formats = {get_format(f.filename) for f in files}
-    if len(formats) > 1:
-        raise MixedFormatsError()
+    files: list[PreparedFile]
+    total_bytes: int
 
 
-async def read_file_content(file: UploadFile) -> tuple[bytes, str]:
+async def _read_and_hash(file: UploadFile) -> PreparedFile:
+    filename = safe_filename(file.filename)
     content = await file.read()
     if not content:
-        raise EmptyFileError(file.filename)
-    sha256 = hashlib.sha256(content).hexdigest()
-    return content, sha256
+        raise EmptyFileError(filename)
+
+    return PreparedFile(
+        filename=filename,
+        content=content,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
 
 
-async def check_duplicate(sha256: str, db: AsyncSession) -> None:
-    result = await db.execute(select(File).where(File.sha256_hash == sha256))
-    if result.scalar_one_or_none() is not None:
-        raise DuplicateFileError()
+async def _reject_already_uploaded(prepared: list[PreparedFile], db: AsyncSession) -> None:
+    """Reject files whose exact bytes were uploaded before, in one query
+    rather than one per file."""
+    by_hash = {item.sha256: item for item in prepared}
+
+    result = await db.execute(
+        select(File.sha256_hash).where(File.sha256_hash.in_(by_hash.keys()))
+    )
+    for known_hash in result.scalars():
+        raise DuplicateFileError(by_hash[known_hash].filename)
 
 
-async def process_upload(files: list[UploadFile], db: AsyncSession) -> tuple[Session, Job]:
-    validate_tier0(files)
+async def _prepare_files(files: list[UploadFile], db: AsyncSession) -> PreparedBatch:
+    """Read every file once, hashing and size-checking as it goes.
 
-    file_format = get_format(files[0].filename)
-    collected: list[tuple[UploadFile, bytes, str]] = []
-    total_size = 0
+    The size check runs against the running total so an oversized batch is
+    rejected as soon as it crosses the limit, without reading the rest.
+    """
+    prepared: list[PreparedFile] = []
+    total_bytes = 0
+    seen_hashes: dict[str, str] = {}
 
     for file in files:
-        content, sha256 = await read_file_content(file)
-        total_size += len(content)
+        item = await _read_and_hash(file)
 
-        if total_size > MAX_BYTES:
+        total_bytes += item.size_bytes
+        if total_bytes > settings.max_upload_bytes:
             raise FileTooLargeError(settings.max_file_size_mb)
 
-        await check_duplicate(sha256, db)
-        collected.append((file, content, sha256))
+        # Two names for identical bytes would produce redundant nodes later.
+        if item.sha256 in seen_hashes:
+            raise DuplicateFileError(item.filename)
+        seen_hashes[item.sha256] = item.filename
 
-    session = Session(
+        prepared.append(item)
+
+    await _reject_already_uploaded(prepared, db)
+    return PreparedBatch(files=prepared, total_bytes=total_bytes)
+
+
+def _build_session(file_format: FileFormat, batch: PreparedBatch) -> Session:
+    """Build the Session row.
+
+    The id is generated here rather than left to the database so that storage
+    can group the files under it before anything is written.
+    """
+    return Session(
+        session_id=uuid.uuid4(),
         format=file_format,
-        total_files=len(files),
-        total_size_bytes=total_size,
+        total_files=len(batch.files),
+        total_size_bytes=batch.total_bytes,
         status=SessionStatus.queued,
     )
+
+
+async def process_upload(
+    files: list[UploadFile],
+    db: AsyncSession,
+    storage: FileStorage,
+) -> tuple[Session, Job]:
+    """Validate, store, and record an upload.
+
+    Everything is committed in one transaction, so a failure part-way through
+    leaves no half-recorded session behind. The job is published only after
+    this returns, meaning the Worker never sees a job whose rows are missing.
+    """
+    file_format = validate_upload(files)
+    batch = await _prepare_files(files, db)
+
+    session = _build_session(file_format, batch)
     db.add(session)
-    await db.flush()
 
-    upload_dir = Path(settings.upload_dir) / str(session.session_id)
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    for item in batch.files:
+        db.add(
+            File(
+                session_id=session.session_id,
+                original_filename=item.filename,
+                sha256_hash=item.sha256,
+                size_bytes=item.size_bytes,
+                stored_path=storage.save(session.session_id, item.filename, item.content),
+            )
+        )
 
-    for file, content, sha256 in collected:
-        stored_path = upload_dir / file.filename
-        stored_path.write_bytes(content)
-        db.add(File(
-            session_id=session.session_id,
-            original_filename=file.filename,
-            sha256_hash=sha256,
-            size_bytes=len(content),
-            stored_path=str(stored_path),
-        ))
-
-    job = Job(session_id=session.session_id)
+    job = Job(job_id=uuid.uuid4(), session_id=session.session_id)
     db.add(job)
 
     await db.commit()
-    await db.refresh(session)
-    await db.refresh(job)
 
+    log.info(
+        "Upload stored: session_id=%s format=%s files=%d bytes=%d",
+        session.session_id,
+        file_format.value,
+        session.total_files,
+        session.total_size_bytes,
+    )
     return session, job

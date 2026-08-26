@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ontology-shared"
+version = "0.1.0"
+description = "Shared models, config, and messaging contracts for the Ontology KG services"
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.29.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["ontology_shared*"]
