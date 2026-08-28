@@ -1,4 +1,7 @@
+from urllib.parse import quote
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 
 class BaseAppSettings(BaseSettings):
@@ -23,14 +26,26 @@ class BaseAppSettings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        """Connection string with credentials escaped.
+
+        Built through ``URL.create`` rather than by formatting a string,
+        because a password containing ``@``, ``:``, ``/`` or ``%`` would
+        otherwise be read as part of the host and produce a DNS lookup for a
+        name that does not exist.
+        """
+        return URL.create(
+            drivername="postgresql+asyncpg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        ).render_as_string(hide_password=False)
 
     @property
     def rabbitmq_url(self) -> str:
-        return (
-            f"amqp://{self.rabbitmq_user}:{self.rabbitmq_password}"
-            f"@{self.rabbitmq_host}:{self.rabbitmq_port}/"
-        )
+        """Broker URL with credentials percent-encoded, for the same reason as
+        ``database_url``."""
+        username = quote(self.rabbitmq_user, safe="")
+        password = quote(self.rabbitmq_password, safe="")
+        return f"amqp://{username}:{password}@{self.rabbitmq_host}:{self.rabbitmq_port}/"
