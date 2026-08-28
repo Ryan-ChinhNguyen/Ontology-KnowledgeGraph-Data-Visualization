@@ -15,7 +15,13 @@ from contextlib import asynccontextmanager
 import aio_pika
 from aio_pika.abc import AbstractChannel, AbstractRobustConnection
 from aio_pika.pool import Pool
-from ontology_shared.messaging import DEAD_QUEUE, JOB_QUEUE, JOB_QUEUE_ARGUMENTS
+from ontology_shared.messaging import (
+    DEAD_QUEUE,
+    JOB_QUEUE,
+    JOB_QUEUE_ARGUMENTS,
+    RETRY_QUEUE,
+    RETRY_QUEUE_ARGUMENTS,
+)
 
 from app.core.config import settings
 
@@ -97,9 +103,10 @@ class RabbitMQBroker:
             if self._queues_declared:
                 return
             await channel.declare_queue(DEAD_QUEUE, durable=True)
+            await channel.declare_queue(RETRY_QUEUE, durable=True, arguments=RETRY_QUEUE_ARGUMENTS)
             await channel.declare_queue(JOB_QUEUE, durable=True, arguments=JOB_QUEUE_ARGUMENTS)
             self._queues_declared = True
-            log.info("Declared queues: %s, %s", JOB_QUEUE, DEAD_QUEUE)
+            log.info("Declared queues: %s, %s, %s", JOB_QUEUE, RETRY_QUEUE, DEAD_QUEUE)
 
 
 broker = RabbitMQBroker()

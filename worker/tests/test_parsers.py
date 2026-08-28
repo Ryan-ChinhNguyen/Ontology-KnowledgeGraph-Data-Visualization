@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 from ontology_shared.models import FileFormat
 
+from app.errors import FileContentError
 from app.parsers.csv_parser import CsvParser
 from app.parsers.json_parser import JsonParser
 from app.parsers.parquet_parser import ParquetParser
@@ -112,7 +113,7 @@ class TestJsonParser:
     def test_rejects_a_scalar_root(self, tmp_path: Path) -> None:
         path = write(tmp_path, "scalar.json", json.dumps(42))
 
-        with pytest.raises(ValueError, match="object or an array"):
+        with pytest.raises(FileContentError, match="object or an array"):
             JsonParser().parse([path])
 
 

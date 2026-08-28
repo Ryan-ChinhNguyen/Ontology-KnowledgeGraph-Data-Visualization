@@ -18,11 +18,18 @@ class InMemoryStorage(FileStorage):
 
     def __init__(self) -> None:
         self.saved: dict[str, bytes] = {}
+        self.deleted: list[uuid.UUID] = []
 
     def save(self, session_id: uuid.UUID, filename: str, content: bytes) -> str:
         location = f"memory://{session_id}/{filename}"
         self.saved[location] = content
         return location
+
+    def delete(self, session_id: uuid.UUID) -> None:
+        prefix = f"memory://{session_id}/"
+        for location in [key for key in self.saved if key.startswith(prefix)]:
+            del self.saved[location]
+        self.deleted.append(session_id)
 
 
 @pytest.fixture

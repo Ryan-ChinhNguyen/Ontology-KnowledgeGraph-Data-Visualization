@@ -5,6 +5,7 @@ so moving to S3 or Azure Blob later means adding an implementation here and
 changing nothing else.
 """
 
+import shutil
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -16,6 +17,14 @@ class FileStorage(ABC):
         """Persist ``content`` and return the location recorded on the File row.
 
         ``filename`` must already be sanitised by the caller.
+        """
+
+    @abstractmethod
+    def delete(self, session_id: uuid.UUID) -> None:
+        """Remove everything stored for a session.
+
+        Deleting what is already gone must succeed, so that a caller whose
+        first attempt failed part-way through can simply try again.
         """
 
 
@@ -36,3 +45,8 @@ class LocalFileStorage(FileStorage):
         destination = directory / filename
         destination.write_bytes(content)
         return str(destination)
+
+    def delete(self, session_id: uuid.UUID) -> None:
+        # The directory is named by a UUID the service generated, so it cannot
+        # be steered outside the root by anything a caller supplied.
+        shutil.rmtree(self._root / str(session_id), ignore_errors=True)

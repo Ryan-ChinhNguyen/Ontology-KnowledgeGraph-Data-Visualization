@@ -84,6 +84,18 @@ class QueueUnavailableError(ApiError):
         super().__init__("Job queue is unavailable; the upload will be retried automatically")
 
 
+class SessionInUseError(ApiError):
+    """The session is still being worked on and must not be removed."""
+
+    status_code = status.HTTP_409_CONFLICT
+
+    def __init__(self, session_id: str, current_status: str) -> None:
+        super().__init__(
+            f"Session '{session_id}' is '{current_status}' and cannot be deleted "
+            "while it is still being processed"
+        )
+
+
 class SessionNotFoundError(ApiError):
     status_code = status.HTTP_404_NOT_FOUND
 

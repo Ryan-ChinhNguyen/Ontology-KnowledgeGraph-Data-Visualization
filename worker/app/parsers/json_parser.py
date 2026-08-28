@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.errors import FileContentError
 from app.parsers.base import BaseParser, Column, NormalizedData, Table
 
 NESTED_KEY_SEPARATOR = "."
@@ -28,7 +29,7 @@ class JsonParser(BaseParser):
             return [self._build_table(default_name, document)]
 
         if not isinstance(document, dict):
-            raise ValueError("JSON root must be an object or an array")
+            raise FileContentError("JSON root must be an object or an array")
 
         # An object whose values are arrays holds several record sets, one per
         # key — the shape a multi-table export usually takes.

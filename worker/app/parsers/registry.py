@@ -2,6 +2,7 @@
 
 from ontology_shared.models import FileFormat
 
+from app.errors import UnsupportedFormatError
 from app.parsers.base import BaseParser
 from app.parsers.csv_parser import CsvParser
 from app.parsers.json_parser import JsonParser
@@ -16,11 +17,6 @@ _PARSERS: dict[FileFormat, BaseParser] = {
 }
 
 
-class UnsupportedFormatError(RuntimeError):
-    def __init__(self, file_format: FileFormat) -> None:
-        super().__init__(f"No parser registered for format '{file_format.value}'")
-
-
 def parser_for(file_format: FileFormat) -> BaseParser:
     """The parser for ``file_format``.
 
@@ -29,5 +25,5 @@ def parser_for(file_format: FileFormat) -> BaseParser:
     """
     parser = _PARSERS.get(file_format)
     if parser is None:
-        raise UnsupportedFormatError(file_format)
+        raise UnsupportedFormatError(f"No parser registered for format '{file_format.value}'")
     return parser

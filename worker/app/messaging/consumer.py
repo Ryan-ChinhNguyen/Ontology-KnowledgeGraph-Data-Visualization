@@ -1,8 +1,11 @@
 """Consumes job messages and decides what happens to one that fails.
 
-Retries are performed by republishing with an incremented attempt counter
-rather than by requeueing in place, so a poison message cannot spin at the
-head of the queue and starve the jobs behind it.
+The original message is acknowledged only after the job has been dealt with
+for good — either processed successfully, or safely handed to a holding queue
+or the dead-letter queue. Every hand-off is published with confirms, so the
+acknowledgement follows the broker's own guarantee that the next copy is
+stored. A crash between the two produces a duplicate rather than a loss, and
+the Worker's idempotency check makes a duplicate a no-op.
 """
 
 import asyncio
@@ -10,9 +13,18 @@ import logging
 
 import aio_pika
 from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel
-from ontology_shared.messaging import DEAD_QUEUE, JOB_QUEUE, JOB_QUEUE_ARGUMENTS, JobMessage
+from ontology_shared.messaging import (
+    DEAD_QUEUE,
+    JOB_QUEUE,
+    JOB_QUEUE_ARGUMENTS,
+    RETRY_QUEUE,
+    RETRY_QUEUE_ARGUMENTS,
+    JobMessage,
+    retry_delay_for,
+)
 
 from app.core.config import settings
+from app.errors import PermanentJobError
 from app.services.job_processor import process_job
 
 log = logging.getLogger(__name__)
@@ -35,10 +47,14 @@ class JobConsumer:
         )
 
         async with connection:
-            self._channel = await connection.channel()
+            # Confirms are what let a republished retry be acknowledged safely.
+            self._channel = await connection.channel(publisher_confirms=True)
             await self._channel.set_qos(prefetch_count=settings.prefetch_count)
 
             await self._channel.declare_queue(DEAD_QUEUE, durable=True)
+            await self._channel.declare_queue(
+                RETRY_QUEUE, durable=True, arguments=RETRY_QUEUE_ARGUMENTS
+            )
             queue = await self._channel.declare_queue(
                 JOB_QUEUE, durable=True, arguments=JOB_QUEUE_ARGUMENTS
             )
@@ -51,49 +67,75 @@ class JobConsumer:
         try:
             job = JobMessage.decode(message.body)
         except ValueError:
-            # Undecodable bodies can never succeed; send them straight to the
-            # dead-letter queue instead of burning retries on them.
-            log.exception("Discarding malformed message")
-            await message.reject(requeue=False)
+            # An undecodable body can never succeed, so it is parked directly
+            # rather than cycling through retries. The bytes are forwarded
+            # unchanged, since they are the only record of what arrived.
+            log.exception("Parking malformed message")
+            await self._move(message, message.body, DEAD_QUEUE)
             return
 
-        attempt_number = job.attempt + 1
-        is_final = attempt_number >= self._max_attempts
-        log.info("Job received: job_id=%s attempt=%d/%d", job.job_id, attempt_number, self._max_attempts)
+        attempt = job.attempt + 1
+        is_final = attempt >= self._max_attempts
+        log.info("Job received: job_id=%s attempt=%d/%d", job.job_id, attempt, self._max_attempts)
 
         try:
-            await process_job(job, is_final_attempt=is_final)
+            await process_job(job, attempt=attempt, is_final_attempt=is_final)
+        except PermanentJobError:
+            # Repeating this would fail identically, so it skips the retries
+            # and keeps the dead-letter queue to genuinely unexplained work.
+            log.error("Job cannot succeed, parking: job_id=%s", job.job_id, exc_info=True)
+            await self._move(message, job.encode(), DEAD_QUEUE)
+            return
         except Exception:
-            await self._on_failure(message, job, is_final)
+            await self._on_failure(message, job, attempt, is_final)
             return
 
         await message.ack()
         log.info("Job finished: job_id=%s", job.job_id)
 
     async def _on_failure(
-        self, message: AbstractIncomingMessage, job: JobMessage, is_final: bool
+        self,
+        message: AbstractIncomingMessage,
+        job: JobMessage,
+        attempt: int,
+        is_final: bool,
     ) -> None:
         if is_final:
-            log.exception("Job exhausted retries, dead-lettering: job_id=%s", job.job_id)
-            await message.reject(requeue=False)
+            log.exception("Job exhausted its attempts: job_id=%s", job.job_id)
+            await self._move(message, job.encode(), DEAD_QUEUE)
             return
 
+        delay = retry_delay_for(attempt)
         log.warning(
-            "Job failed, scheduling retry: job_id=%s next_attempt=%d",
-            job.job_id,
-            job.attempt + 2,
-            exc_info=True,
+            "Job failed, retrying in %ds: job_id=%s", delay, job.job_id, exc_info=True
         )
-        await self._republish(job)
-        await message.ack()
+        await self._move(message, job.next_attempt().encode(), RETRY_QUEUE, delay=delay)
 
-    async def _republish(self, job: JobMessage) -> None:
-        retry = job.model_copy(update={"attempt": job.attempt + 1})
+    async def _move(
+        self,
+        message: AbstractIncomingMessage,
+        body: bytes,
+        queue: str,
+        *,
+        delay: int | None = None,
+    ) -> None:
+        """Send ``body`` to another queue, then release the original.
+
+        ``delay`` sets the message's own expiry, which is how a single holding
+        queue can serve several wait times.
+
+        ``publish`` returns only once the broker has confirmed the message, so
+        reaching the acknowledgement means the next copy is durably stored. If
+        the publish fails, the exception propagates without acknowledging and
+        the original stays queued for redelivery.
+        """
         await self._channel.default_exchange.publish(
             aio_pika.Message(
-                body=retry.encode(),
+                body=body,
                 content_type="application/json",
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                expiration=delay,
             ),
-            routing_key=JOB_QUEUE,
+            routing_key=queue,
         )
+        await message.ack()

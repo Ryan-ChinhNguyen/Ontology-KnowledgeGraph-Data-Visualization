@@ -11,6 +11,7 @@ from app.dependencies import get_storage
 from app.exceptions import SessionNotFoundError
 from app.models.schemas import ErrorResponse, SessionStatusResponse, UploadResponse
 from app.services.queue_service import publish_job
+from app.services.session_service import delete_session
 from app.services.storage import FileStorage
 from app.services.upload_service import process_upload
 
@@ -99,3 +100,33 @@ async def get_session_status(
         .limit(1)
     )
     return SessionStatusResponse.build(session, latest_job.scalar_one_or_none())
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an upload and its files",
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "No session with this id.",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "The session is still queued or being processed.",
+        },
+    },
+)
+async def delete_session_by_id(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    storage: FileStorage = Depends(get_storage),
+) -> None:
+    """Remove a session, its records, and its stored files.
+
+    Only a session that has finished — `ready` or `failed` — may be deleted.
+
+    Because uploads are rejected when their content hash is already on record,
+    this is also how the same file becomes uploadable again after a failure.
+    """
+    await delete_session(session_id, db, storage)

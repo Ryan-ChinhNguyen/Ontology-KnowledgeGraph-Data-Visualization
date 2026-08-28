@@ -15,15 +15,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import session_factory
+from app.errors import JobNotFoundError, PermanentJobError
 from app.parsers.base import NormalizedData
 from app.parsers.registry import parser_for
 
 log = logging.getLogger(__name__)
-
-
-class JobNotFoundError(RuntimeError):
-    def __init__(self, job_id: uuid.UUID) -> None:
-        super().__init__(f"Job '{job_id}' does not exist")
 
 
 async def _load_file_paths(db: AsyncSession, session_id: uuid.UUID) -> list[str]:
@@ -69,8 +65,14 @@ async def _mark_failed(
     await db.commit()
 
 
-async def process_job(message: JobMessage, *, is_final_attempt: bool) -> NormalizedData | None:
+async def process_job(
+    message: JobMessage, *, attempt: int, is_final_attempt: bool
+) -> NormalizedData | None:
     """Parse the files of one session.
+
+    ``attempt`` is recorded against the job so the database reflects how many
+    deliveries it took; the count itself is kept by the broker, which is the
+    only party that sees every delivery.
 
     Returns ``None`` when the job was already completed by an earlier delivery.
     Re-raises any parsing error after recording it, leaving the retry decision
@@ -79,7 +81,7 @@ async def process_job(message: JobMessage, *, is_final_attempt: bool) -> Normali
     async with session_factory() as db:
         job = await db.get(Job, message.job_id)
         if job is None:
-            raise JobNotFoundError(message.job_id)
+            raise JobNotFoundError(f"Job '{message.job_id}' does not exist")
 
         # Idempotency: a redelivered message for finished work is a no-op.
         if job.status is JobStatus.done:
@@ -87,13 +89,18 @@ async def process_job(message: JobMessage, *, is_final_attempt: bool) -> Normali
             return None
 
         session = await db.get(Session, message.session_id)
-        await _mark_started(db, job, session, message.attempt)
+        await _mark_started(db, job, session, attempt)
 
         try:
             parser = parser_for(session.format)
             normalized = parser.parse(await _load_file_paths(db, session.session_id))
         except Exception as error:
-            await _mark_failed(db, job, session, error, final=is_final_attempt)
+            # A failure that retrying cannot fix ends the job now, whatever
+            # attempt it is on, so the session reports what actually happened
+            # instead of sitting in `processing` through retries that are
+            # certain to fail the same way.
+            settled = is_final_attempt or isinstance(error, PermanentJobError)
+            await _mark_failed(db, job, session, error, final=settled)
             raise
 
         await _mark_succeeded(db, job, session)
