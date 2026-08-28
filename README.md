@@ -176,36 +176,61 @@ Both the API Service (write) and Worker Service (read) reference files via their
 
 ### RabbitMQ Failure Handling
 
-If RabbitMQ becomes unavailable, two problems arise simultaneously:
+An outage affects the two services differently.
 
-- **API Service (Producer):** Cannot publish jobs → uploads succeed but jobs are silently lost
-- **Worker Service (Consumer):** Loses connection → processing stops entirely
+The **Worker** copes on its own. `connect_robust` retries with backoff, and RabbitMQ keeps durable messages through a restart, so the Worker pauses and then resumes where it left off. Nothing is required here.
 
-#### Solution: Outbox Pattern *(evaluated, not implemented in this version)*
+The **API** is the exposed side. Its upload writes rows to PostgreSQL and then publishes a job to RabbitMQ — two systems, no transaction spanning both. This is the **dual-write problem**: if the commit succeeds and the publish does not, the database records a job that nothing will ever run.
 
-> The Outbox Pattern was considered as a solution for RabbitMQ failure resilience. While it provides strong guarantees around job durability, it adds significant implementation complexity and is deferred from the current scope. The analysis is documented here for future reference.
+That failure is observable today. When the broker was stopped mid-test, an upload committed its rows, failed to publish, and returned `503`. The session was left `queued` with no message behind it — and because a `queued` session cannot be deleted, and its content hash now blocks re-uploading the same file, that session was stuck with no way forward or back.
 
-To prevent job loss when RabbitMQ is down, the API Service writes the job to PostgreSQL first before publishing:
+#### Solution: Transactional Outbox *(analysed, not implemented in this version)*
+
+> Deferred deliberately. At MVP scale an outage is noticed and dealt with by hand, and the design below is documented so it can be added without rework rather than discovered under pressure.
+
+The fix is not to make two writes more reliable but to reduce them to one: record the intent to publish inside the same transaction as the business data, and let a separate relay deliver it.
 
 ```
-API Service:
-  INSERT Job (status: pending)        ← atomic with file record
-  Publish to RabbitMQ
-    Success → UPDATE Job (status: queued)
-    Fail    → job stays as pending in DB
-
-Outbox Poller (background process in API Service):
-  SELECT Jobs WHERE status = 'pending'
-  Retry publish to RabbitMQ
-    Success → UPDATE Job (status: queued)
+┌─ BEGIN ─────────────────────────────┐
+│  INSERT sessions                    │
+│  INSERT files                       │   one transaction, one system —
+│  INSERT job  (status: queued)       │   all of it commits, or none
+└─ COMMIT ────────────────────────────┘
+                  │
+                  ▼
+   Relay: publish queued jobs → mark dispatched
 ```
 
-When RabbitMQ recovers, the Outbox Poller automatically flushes all pending jobs — no jobs are lost regardless of how long the outage lasts.
+**The `jobs` table already is this outbox.** A row with `status = queued` and no message in flight is exactly an undelivered outbox entry, so no new table is needed — only the relay that drains it, and a `published_at` column to tell "waiting to be sent" from "sent, waiting to be run".
 
-#### Worker Reconnection
+This gives at-least-once delivery: a relay that crashes between publishing and marking will publish again. That is safe here because the Worker skips a job it has already completed.
 
-The Worker Service implements connection retry with exponential backoff. When RabbitMQ recovers, the Worker reconnects automatically and resumes consuming from where it left off. RabbitMQ retains all durable messages during the outage.
+**What it changes for callers.** An upload no longer fails when the broker is down. The work is durably recorded, so the API can answer `201` and let the relay deliver the job whenever RabbitMQ returns. A broker outage stops being an error the user sees and becomes a delay they do not notice.
 
-#### Tradeoff
+#### Waking the relay
 
-The Outbox Poller introduces a small delay between RabbitMQ recovery and job dispatch (one polling interval). This is acceptable for a file processing workload where near-real-time is not required. For lower latency, PostgreSQL `LISTEN/NOTIFY` can be used to wake the Poller immediately instead of polling on a fixed interval.
+| Mechanism | Latency | Trade-off |
+|-----------|---------|-----------|
+| Polling on an interval | One interval | Simplest; costs a periodic query that usually finds nothing |
+| PostgreSQL `LISTEN/NOTIFY` | Near-immediate | Still needs polling as a backstop in case a notification is missed |
+| Change data capture (Debezium) | Very low | Reads the write-ahead log directly, but brings Kafka Connect with it — worth it only where that already exists |
+
+#### The reconciliation sweep
+
+Whichever mechanism dispatches jobs, a periodic sweep is what makes the system self-healing:
+
+```sql
+SELECT job_id, session_id FROM jobs
+WHERE status = 'queued'
+  AND queued_at < now() - interval '5 minutes'
+```
+
+Re-publishing these is safe for the same reason the relay is. This is the piece that recovers from cases nobody anticipated, including a bug in the relay itself, and it is the smallest useful step: it needs no schema change and removes the stuck state described above.
+
+Worth watching alongside it: the number of jobs sitting in `queued`, and the depth of the dead-letter queue. Either one climbing is the earliest sign that dispatch has stalled.
+
+#### What this does not solve
+
+An outbox stops jobs from being lost; it does not keep the broker up. Reducing outages themselves is a separate concern — a RabbitMQ cluster with quorum queues survives losing a node — and clustering does not remove the need for an outbox, because the dual write remains.
+
+Two approaches are sometimes suggested and rejected here. **Two-phase commit** across the database and broker is technically possible but performs poorly, blocks on a coordinator failure, and is barely supported by client libraries. **Publishing before writing to the database** only works when the message carries enough to rebuild the state; ours carries identifiers that refer back to rows, so it does not.
