@@ -97,7 +97,22 @@ Three options were considered: PostgreSQL LISTEN/NOTIFY, RabbitMQ, and Kafka.
 | Lightweight | Easy to run locally via Docker |
 | Flexible routing | Exchanges support future Bulkhead pattern (separate queues per format) |
 
-**Tradeoff:** RabbitMQ does not retain messages after consumption. If audit log or message replay is needed in the future, Kafka would be the better fit.
+**Tradeoffs accepted:**
+
+| Tradeoff | Detail |
+|----------|--------|
+| Not an event log | A classic queue deletes each message on acknowledgment, so the queue is not a record of what ran |
+| No replay from the queue | An acknowledged message cannot be re-read — there is no offset to rewind to |
+| Lower throughput | Tens of thousands of messages per second, against millions for Kafka |
+| Harder to scale horizontally | Kafka shards a topic into partitions and gains parallelism by adding them; a RabbitMQ queue is one logical unit, scaled by adding competing consumers or by splitting into several queues by hand |
+
+**How this project works around them**
+
+History and replay come from PostgreSQL rather than from the broker. The `jobs` table records every job with its status, attempt count, error, and timestamps, so auditing is a query against that table and replaying is selecting rows from it and publishing them again — safe because the Worker's idempotency check makes a repeated message a no-op. This is a mechanism built here, not something RabbitMQ provides.
+
+Its limit is that `jobs` holds current state, not event-level history: an earlier attempt's error is overwritten by the next. Should that history be needed, RabbitMQ **stream queues** (`x-queue-type: stream`) are append-only logs with non-destructive reads and age- or size-based retention, and would run alongside the classic job queue rather than replace it. Note that `x-message-ttl` is not equivalent — it bounds how long an *unconsumed* message may wait before being discarded, whereas log retention guarantees availability *after* reading.
+
+The remaining two tradeoffs are not worked around because they are not reached: the workload is a handful of 20MB uploads, and per-format queues (Bulkhead) cover the foreseeable scaling need.
 
 ---
 
@@ -141,7 +156,7 @@ The current design is intentionally simple for local MVP use. The following chan
 |---------|-----|----------|
 | Worker concurrency | Single worker instance | Multiple Worker instances consuming from the same queue |
 | Queue isolation | Single job queue | Separate queues per file format (Bulkhead pattern) — slow SQL parsing does not delay CSV parsing |
-| Message replay / audit | Not needed | Migrate from RabbitMQ to Kafka for event sourcing and replay capability |
+| Message replay / audit | Served by the `jobs` table | Add a RabbitMQ stream queue alongside the job queue for event-level history — no change of broker |
 | Job persistence | In-flight jobs lost on Worker restart (re-queued via RabbitMQ) | Outbox pattern ensures no job is lost even if both API and queue are temporarily unavailable |
 | Backpressure | Queue grows unbounded | Cap queue size, return HTTP 429 when limit reached |
 | File storage | Local disk | AWS S3 or Azure Blob Storage (see below) |

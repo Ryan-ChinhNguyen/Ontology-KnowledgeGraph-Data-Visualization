@@ -1,0 +1,18 @@
+# Install from inside this directory -- pip resolves the relative path below
+# against the working directory, not against this file:
+#     cd api && pip install -r requirements.txt
+-e ../shared
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+alembic==1.13.3
+aio-pika==9.4.3
+python-multipart==0.0.12
+
+# Pulled in through the shared package, which declares only lower bounds
+# because it is a library. This service is what actually runs, so it pins the
+# versions it was tested against.
+sqlalchemy[asyncio]==2.0.52
+asyncpg==0.31.0
+pydantic==2.13.4
+pydantic-settings==2.15.0
