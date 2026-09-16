@@ -1,15 +1,13 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from ontology_shared.messaging import (
-    DEAD_QUEUE,
-    RETRY_DELAYS_SECONDS,
-    RETRY_QUEUE,
-    JobMessage,
-)
+from aio_pika.exceptions import DeliveryError
+from ontology_shared.messaging import DEAD_QUEUE, RETRY_DELAYS_SECONDS, RETRY_QUEUE, JobMessage
 
+from app.core.config import settings
 from app.errors import FileContentError
 from app.messaging.consumer import JobConsumer
+from app.services.job_processor import JobResult, Outcome
 
 MAX_ATTEMPTS = 3
 
@@ -19,6 +17,7 @@ def consumer() -> JobConsumer:
     instance = JobConsumer(max_attempts=MAX_ATTEMPTS)
     instance._channel = MagicMock()
     instance._channel.default_exchange.publish = AsyncMock()
+    instance._channel.declare_queue = AsyncMock()
     return instance
 
 
@@ -34,9 +33,13 @@ def published(consumer: JobConsumer) -> tuple[JobMessage, str, object]:
     return JobMessage.decode(sent.body), call.kwargs["routing_key"], sent.expiration
 
 
+def publish_calls(consumer: JobConsumer) -> int:
+    return consumer._channel.default_exchange.publish.await_count
+
+
 @pytest.fixture
 def processor(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    stub = AsyncMock()
+    stub = AsyncMock(return_value=JobResult(Outcome.PROCESSED))
     monkeypatch.setattr("app.messaging.consumer.process_job", stub)
     return stub
 
@@ -47,23 +50,60 @@ def failing_processor(processor: AsyncMock) -> AsyncMock:
     return processor
 
 
-class TestSuccess:
-    async def test_acknowledges_only_after_the_job_is_processed(
+class TestOutcomes:
+    async def test_acknowledges_a_processed_job(
         self, consumer: JobConsumer, processor: AsyncMock, job_message: JobMessage
     ) -> None:
         message = incoming(job_message)
 
         await consumer._on_message(message)
 
-        processor.assert_awaited_once()
+        message.ack.assert_awaited_once()
+        assert publish_calls(consumer) == 0
+
+    @pytest.mark.parametrize("outcome", [Outcome.ALREADY_SETTLED, Outcome.SUPERSEDED])
+    async def test_acknowledges_a_delivery_with_nothing_left_to_do(
+        self,
+        consumer: JobConsumer,
+        processor: AsyncMock,
+        job_message: JobMessage,
+        outcome: Outcome,
+    ) -> None:
+        processor.return_value = JobResult(outcome)
+        message = incoming(job_message)
+
+        await consumer._on_message(message)
+
+        message.ack.assert_awaited_once()
+        assert publish_calls(consumer) == 0
+
+
+class TestJobHeldElsewhere:
+    @pytest.fixture
+    def held(self, processor: AsyncMock) -> AsyncMock:
+        processor.return_value = JobResult(Outcome.IN_PROGRESS)
+        return processor
+
+    async def test_checks_again_later_instead_of_dropping_it(
+        self, consumer: JobConsumer, held: AsyncMock, job_message: JobMessage
+    ) -> None:
+        """Acknowledging would lose the job if the worker holding it dies."""
+        message = incoming(job_message)
+
+        await consumer._on_message(message)
+
+        _, destination, expiration = published(consumer)
+        assert destination == RETRY_QUEUE
+        assert expiration == settings.in_progress_recheck_seconds
         message.ack.assert_awaited_once()
 
-    async def test_moves_the_message_nowhere(
-        self, consumer: JobConsumer, processor: AsyncMock, job_message: JobMessage
+    async def test_does_not_spend_an_attempt(
+        self, consumer: JobConsumer, held: AsyncMock, job_message: JobMessage
     ) -> None:
         await consumer._on_message(incoming(job_message))
 
-        consumer._channel.default_exchange.publish.assert_not_awaited()
+        recheck, _, _ = published(consumer)
+        assert recheck.attempt == job_message.attempt
 
 
 class TestExponentialBackoff:
@@ -98,28 +138,6 @@ class TestExponentialBackoff:
         retry, _, _ = published(consumer)
         assert retry.attempt == 1
         assert retry.job_id == job_message.job_id
-
-    async def test_acknowledges_only_after_the_retry_is_confirmed(
-        self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
-    ) -> None:
-        message = incoming(job_message)
-
-        await consumer._on_message(message)
-
-        message.ack.assert_awaited_once()
-
-    async def test_keeps_the_message_queued_when_the_retry_cannot_be_stored(
-        self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
-    ) -> None:
-        """Without a confirmed retry there is nothing to take over from the
-        original, so it must not be acknowledged."""
-        consumer._channel.default_exchange.publish.side_effect = ConnectionError("broker gone")
-        message = incoming(job_message)
-
-        with pytest.raises(ConnectionError):
-            await consumer._on_message(message)
-
-        message.ack.assert_not_awaited()
 
     async def test_reports_the_attempt_to_the_processor(
         self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
@@ -168,48 +186,68 @@ class TestDeadLettering:
         message.ack.assert_awaited_once()
         processor.assert_not_awaited()
 
-
-class TestPermanentFailures:
-    """Errors this service raises itself, where the cause rules out success."""
-
-    @pytest.fixture
-    def permanently_failing_processor(self, processor: AsyncMock) -> AsyncMock:
-        processor.side_effect = FileContentError("JSON root must be an object or an array")
-        return processor
-
-    async def test_parks_without_spending_retries(
-        self,
-        consumer: JobConsumer,
-        permanently_failing_processor: AsyncMock,
-        job_message: JobMessage,
+    async def test_parks_a_permanent_failure_without_spending_retries(
+        self, consumer: JobConsumer, processor: AsyncMock, job_message: JobMessage
     ) -> None:
+        processor.side_effect = FileContentError("JSON root must be an object or an array")
+
+        await consumer._on_message(incoming(job_message))
+
+        _, destination, expiration = published(consumer)
+        assert destination == DEAD_QUEUE
+        assert expiration is None
+
+
+class TestHandOff:
+    async def test_publishes_as_mandatory(
+        self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
+    ) -> None:
+        """Without it a missing queue drops the message, and the broker still
+        confirms it."""
+        await consumer._on_message(incoming(job_message))
+
+        assert consumer._channel.default_exchange.publish.await_args.kwargs["mandatory"] is True
+
+    async def test_restores_a_missing_queue_and_retries_the_hand_off(
+        self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
+    ) -> None:
+        consumer._channel.default_exchange.publish.side_effect = [DeliveryError(None, None), None]
         message = incoming(job_message)
 
         await consumer._on_message(message)
 
-        _, destination, _ = published(consumer)
-        assert destination == DEAD_QUEUE
+        consumer._channel.declare_queue.assert_awaited()
+        assert publish_calls(consumer) == 2
         message.ack.assert_awaited_once()
 
-    async def test_does_not_wait_before_giving_up(
-        self,
-        consumer: JobConsumer,
-        permanently_failing_processor: AsyncMock,
-        job_message: JobMessage,
-    ) -> None:
-        """A delay would only postpone a failure that is already certain."""
-        await consumer._on_message(incoming(job_message))
-
-        _, destination, expiration = published(consumer)
-        assert destination != RETRY_QUEUE
-        assert expiration is None
-
-    async def test_still_retries_an_unclassified_error(
+    async def test_returns_the_message_when_the_hand_off_keeps_failing(
         self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
     ) -> None:
-        """Retrying stays the default: an unfamiliar error may well be
-        transient, and a wasted attempt costs far less than abandoned work."""
-        await consumer._on_message(incoming(job_message))
+        """Acknowledging would lose the job; leaving it neither acknowledged
+        nor rejected would hold this worker's only prefetch slot forever."""
+        consumer._channel.default_exchange.publish.side_effect = DeliveryError(None, None)
+        message = incoming(job_message)
 
-        _, destination, _ = published(consumer)
-        assert destination == RETRY_QUEUE
+        await consumer._on_message(message)
+
+        message.ack.assert_not_awaited()
+        message.nack.assert_awaited_once_with(requeue=True)
+
+    async def test_returns_the_message_when_the_broker_is_unreachable(
+        self, consumer: JobConsumer, failing_processor: AsyncMock, job_message: JobMessage
+    ) -> None:
+        consumer._channel.default_exchange.publish.side_effect = ConnectionError("broker gone")
+        message = incoming(job_message)
+
+        await consumer._on_message(message)
+
+        message.ack.assert_not_awaited()
+        message.nack.assert_awaited_once_with(requeue=True)
+
+    async def test_no_error_escapes_when_the_channel_is_already_gone(
+        self, consumer: JobConsumer, processor: AsyncMock, job_message: JobMessage
+    ) -> None:
+        message = incoming(job_message)
+        message.ack.side_effect = ConnectionError("channel closed")
+
+        await consumer._on_message(message)

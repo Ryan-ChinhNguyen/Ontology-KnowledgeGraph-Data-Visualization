@@ -50,7 +50,7 @@ async def upload_files(
         ...,
         description=(
             "One to five files, all of the same format, 20MB in total. "
-            "Accepted extensions: .csv, .tsv, .json, .sql, .parquet"
+            "Accepted extensions: .csv, .json, .sql, .parquet"
         ),
     ),
     db: AsyncSession = Depends(get_db),

@@ -22,7 +22,6 @@ from app.exceptions import (
 
 EXTENSION_FORMATS: dict[str, FileFormat] = {
     "csv": FileFormat.csv,
-    "tsv": FileFormat.csv,
     "json": FileFormat.json,
     "sql": FileFormat.sql,
     "parquet": FileFormat.parquet,

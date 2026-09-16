@@ -6,8 +6,10 @@ from fastapi import FastAPI, Response, status
 from ontology_shared.logging import configure_logging
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.core.database import dispose_engine, session_factory
 from app.core.rabbitmq import broker
+from app.middleware import RequestSizeLimit
 from app.routers import upload
 
 configure_logging()
@@ -60,7 +62,7 @@ are checked by content hash, so re-uploading identical bytes is rejected.
 
 | Format | Extensions |
 |--------|------------|
-| CSV / TSV | `.csv`, `.tsv` |
+| CSV | `.csv` |
 | JSON | `.json` |
 | SQL dump | `.sql` |
 | Parquet | `.parquet` |
@@ -80,6 +82,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    RequestSizeLimit,
+    max_content_bytes=settings.max_upload_bytes,
+    limit_mb=settings.max_file_size_mb,
+)
 app.include_router(upload.router, prefix="/api")
 
 

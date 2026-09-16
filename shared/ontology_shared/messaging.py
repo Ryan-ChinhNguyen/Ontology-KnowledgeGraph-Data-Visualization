@@ -25,6 +25,7 @@ retry running late rather than anything being lost.
 """
 
 import uuid
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -57,6 +58,25 @@ JOB_QUEUE_ARGUMENTS: dict[str, object] = {
     "x-dead-letter-exchange": DEFAULT_EXCHANGE,
     "x-dead-letter-routing-key": DEAD_QUEUE,
 }
+
+
+class QueueDeclarer(Protocol):
+    """The part of an AMQP channel needed to declare queues."""
+
+    async def declare_queue(self, name: str, *, durable: bool, arguments: Any = None) -> Any: ...
+
+
+async def declare_topology(channel: QueueDeclarer) -> Any:
+    """Declare every queue the services use, and return the job queue.
+
+    Declaration is idempotent, so calling this again is also how a queue that
+    has been removed is brought back. Both services go through here so they can
+    never declare the same queue with different arguments — which RabbitMQ
+    would refuse.
+    """
+    await channel.declare_queue(DEAD_QUEUE, durable=True)
+    await channel.declare_queue(RETRY_QUEUE, durable=True, arguments=RETRY_QUEUE_ARGUMENTS)
+    return await channel.declare_queue(JOB_QUEUE, durable=True, arguments=JOB_QUEUE_ARGUMENTS)
 
 
 def retry_delay_for(attempt: int) -> int:

@@ -81,7 +81,7 @@ class QueueUnavailableError(ApiError):
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
     def __init__(self) -> None:
-        super().__init__("Job queue is unavailable; the upload will be retried automatically")
+        super().__init__("The upload was stored but could not be queued for processing")
 
 
 class SessionInUseError(ApiError):

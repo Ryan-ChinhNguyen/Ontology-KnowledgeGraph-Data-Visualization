@@ -218,4 +218,4 @@ class TestQueueOutage:
             response = await client.post("/api/upload", files=[csv_part()])
 
         assert response.status_code == 503
-        assert "unavailable" in response.json()["detail"]
+        assert "could not be queued" in response.json()["detail"]
