@@ -10,13 +10,19 @@ a loss, and claiming a job before running it makes a duplicate harmless.
 No exception is allowed to escape the callback. A delivery that is neither
 acknowledged nor rejected stays assigned to this consumer, and with a prefetch
 of one that stops the worker from receiving anything else.
+
+The subscription itself is also watched. When its queue is deleted, RabbitMQ
+cancels the subscription and the client library discards it silently; the
+library only resubscribes after a lost connection, which a deleted queue does
+not cause. Without the watch the worker would stay up but never receive work.
 """
 
 import asyncio
 import logging
+from typing import Any
 
 import aio_pika
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel
+from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, ConsumerTag
 from aio_pika.exceptions import DeliveryError
 from ontology_shared.messaging import (
     DEAD_QUEUE,
@@ -38,6 +44,8 @@ class JobConsumer:
     def __init__(self, max_attempts: int = settings.max_retry_attempts) -> None:
         self._max_attempts = max_attempts
         self._channel: AbstractRobustChannel | None = None
+        self._queues: dict[str, Any] = {}
+        self._consumer_tag: ConsumerTag | None = None
 
     async def run(self) -> None:
         """Connect and consume until cancelled.
@@ -57,10 +65,55 @@ class JobConsumer:
             )
             await self._channel.set_qos(prefetch_count=settings.prefetch_count)
 
-            queue = await declare_topology(self._channel)
-            await queue.consume(self._on_message)
+            self._queues = await declare_topology(self._channel)
+            self._consumer_tag = await self._queues[JOB_QUEUE].consume(self._on_message)
             log.info("Consuming from '%s' (prefetch=%d)", JOB_QUEUE, settings.prefetch_count)
-            await asyncio.Future()
+
+            watch = asyncio.create_task(self._watch_subscription())
+            try:
+                await asyncio.Future()
+            finally:
+                watch.cancel()
+
+    async def _watch_subscription(self) -> None:
+        while True:
+            await asyncio.sleep(settings.subscription_check_seconds)
+            try:
+                await self._ensure_subscribed()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Could not verify the subscription to '%s'", JOB_QUEUE)
+
+    async def _ensure_subscribed(self) -> None:
+        """Resubscribe if the broker has cancelled this worker's subscription.
+
+        Waits for the channel to be ready first. During a reconnect the library
+        restores the subscription itself, under the same consumer tag;
+        subscribing here at the same time would reuse that tag, which the
+        broker rejects by closing the channel.
+
+        The check reads the channel's own list of active subscriptions, so it
+        costs no round trip to the broker.
+        """
+        await self._channel.ready()
+        underlay = await self._channel.get_underlay_channel()
+        if self._consumer_tag in underlay.consumers:
+            return
+
+        log.warning("Subscription to '%s' was cancelled by the broker; resubscribing", JOB_QUEUE)
+        await self._restore_topology()
+        await self._queues[JOB_QUEUE].consume(self._on_message, consumer_tag=self._consumer_tag)
+
+    async def _restore_topology(self) -> None:
+        """Declare again the queues declared at startup.
+
+        Reuses the objects kept from startup: declaring through the channel
+        again would add another copy to what the library replays after every
+        reconnect.
+        """
+        for queue in self._queues.values():
+            await queue.declare()
 
     async def _on_message(self, message: AbstractIncomingMessage) -> None:
         try:
@@ -149,7 +202,7 @@ class JobConsumer:
                 await self._publish(body, queue, delay)
             except DeliveryError:
                 log.warning("Message to '%s' was unroutable; redeclaring queues", queue)
-                await declare_topology(self._channel)
+                await self._restore_topology()
                 await self._publish(body, queue, delay)
         except Exception:
             log.exception("Could not hand the message to '%s'; returning it to the queue", queue)

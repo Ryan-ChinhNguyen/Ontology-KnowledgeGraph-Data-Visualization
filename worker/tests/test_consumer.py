@@ -1,8 +1,15 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aio_pika.exceptions import DeliveryError
-from ontology_shared.messaging import DEAD_QUEUE, RETRY_DELAYS_SECONDS, RETRY_QUEUE, JobMessage
+from ontology_shared.messaging import (
+    DEAD_QUEUE,
+    JOB_QUEUE,
+    RETRY_DELAYS_SECONDS,
+    RETRY_QUEUE,
+    JobMessage,
+)
 
 from app.core.config import settings
 from app.errors import FileContentError
@@ -10,6 +17,7 @@ from app.messaging.consumer import JobConsumer
 from app.services.job_processor import JobResult, Outcome
 
 MAX_ATTEMPTS = 3
+CONSUMER_TAG = "worker-tag"
 
 
 @pytest.fixture
@@ -17,8 +25,19 @@ def consumer() -> JobConsumer:
     instance = JobConsumer(max_attempts=MAX_ATTEMPTS)
     instance._channel = MagicMock()
     instance._channel.default_exchange.publish = AsyncMock()
-    instance._channel.declare_queue = AsyncMock()
+    instance._channel.ready = AsyncMock()
+    instance._queues = {
+        name: MagicMock(declare=AsyncMock(), consume=AsyncMock())
+        for name in (DEAD_QUEUE, RETRY_QUEUE, JOB_QUEUE)
+    }
+    instance._consumer_tag = CONSUMER_TAG
     return instance
+
+
+def subscribed_to(consumer: JobConsumer, *tags: str) -> None:
+    """Make the channel report these subscriptions as active."""
+    underlay = MagicMock(consumers={tag: object() for tag in tags})
+    consumer._channel.get_underlay_channel = AsyncMock(return_value=underlay)
 
 
 def incoming(job: JobMessage) -> AsyncMock:
@@ -216,7 +235,8 @@ class TestHandOff:
 
         await consumer._on_message(message)
 
-        consumer._channel.declare_queue.assert_awaited()
+        for queue in consumer._queues.values():
+            queue.declare.assert_awaited_once()
         assert publish_calls(consumer) == 2
         message.ack.assert_awaited_once()
 
@@ -251,3 +271,66 @@ class TestHandOff:
         message.ack.side_effect = ConnectionError("channel closed")
 
         await consumer._on_message(message)
+
+
+class TestSubscriptionWatch:
+    async def test_leaves_an_active_subscription_alone(self, consumer: JobConsumer) -> None:
+        subscribed_to(consumer, CONSUMER_TAG)
+
+        await consumer._ensure_subscribed()
+
+        consumer._queues[JOB_QUEUE].consume.assert_not_awaited()
+        for queue in consumer._queues.values():
+            queue.declare.assert_not_awaited()
+
+    async def test_resubscribes_after_the_broker_cancels_it(self, consumer: JobConsumer) -> None:
+        """Deleting the queue cancels the subscription without the library
+        reinstating it, so the worker would otherwise stop receiving work."""
+        subscribed_to(consumer)
+
+        await consumer._ensure_subscribed()
+
+        for queue in consumer._queues.values():
+            queue.declare.assert_awaited_once()
+        consumer._queues[JOB_QUEUE].consume.assert_awaited_once_with(
+            consumer._on_message, consumer_tag=CONSUMER_TAG
+        )
+
+    async def test_keeps_the_original_consumer_tag(self, consumer: JobConsumer) -> None:
+        """After a reconnect the library resubscribes under the stored tag; a
+        second subscription under a new tag would double this worker's intake."""
+        subscribed_to(consumer, "some-other-tag")
+
+        await consumer._ensure_subscribed()
+
+        assert consumer._queues[JOB_QUEUE].consume.await_args.kwargs["consumer_tag"] == CONSUMER_TAG
+
+    async def test_waits_for_the_channel_to_be_ready_first(self, consumer: JobConsumer) -> None:
+        """Checking mid-reconnect would race the library's own restore, which
+        reuses the same tag — and the broker closes a channel that does that."""
+        order: list[str] = []
+        consumer._channel.ready = AsyncMock(side_effect=lambda: order.append("ready"))
+        underlay = MagicMock(consumers={CONSUMER_TAG: object()})
+
+        async def underlay_channel():
+            order.append("check")
+            return underlay
+
+        consumer._channel.get_underlay_channel = underlay_channel
+
+        await consumer._ensure_subscribed()
+
+        assert order == ["ready", "check"]
+
+    async def test_keeps_watching_after_a_failed_check(
+        self, consumer: JobConsumer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "subscription_check_seconds", 0)
+        consumer._ensure_subscribed = AsyncMock(
+            side_effect=[RuntimeError("broker busy"), None, asyncio.CancelledError()]
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await consumer._watch_subscription()
+
+        assert consumer._ensure_subscribed.await_count == 3

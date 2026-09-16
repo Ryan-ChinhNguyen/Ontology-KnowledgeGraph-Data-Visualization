@@ -66,17 +66,27 @@ class QueueDeclarer(Protocol):
     async def declare_queue(self, name: str, *, durable: bool, arguments: Any = None) -> Any: ...
 
 
-async def declare_topology(channel: QueueDeclarer) -> Any:
-    """Declare every queue the services use, and return the job queue.
+async def declare_topology(channel: QueueDeclarer) -> dict[str, Any]:
+    """Declare every queue the services use, and return them by name.
 
-    Declaration is idempotent, so calling this again is also how a queue that
-    has been removed is brought back. Both services go through here so they can
-    never declare the same queue with different arguments — which RabbitMQ
-    would refuse.
+    Both services go through here so they can never declare the same queue
+    with different arguments — which RabbitMQ would refuse.
+
+    Keep the returned queues rather than calling this again to restore a queue
+    that was removed. With a robust channel each declaration is remembered so
+    it can be replayed after a reconnect, and nothing is ever forgotten, so
+    repeated calls accumulate copies. Declaring the kept objects again avoids
+    that.
     """
-    await channel.declare_queue(DEAD_QUEUE, durable=True)
-    await channel.declare_queue(RETRY_QUEUE, durable=True, arguments=RETRY_QUEUE_ARGUMENTS)
-    return await channel.declare_queue(JOB_QUEUE, durable=True, arguments=JOB_QUEUE_ARGUMENTS)
+    return {
+        DEAD_QUEUE: await channel.declare_queue(DEAD_QUEUE, durable=True),
+        RETRY_QUEUE: await channel.declare_queue(
+            RETRY_QUEUE, durable=True, arguments=RETRY_QUEUE_ARGUMENTS
+        ),
+        JOB_QUEUE: await channel.declare_queue(
+            JOB_QUEUE, durable=True, arguments=JOB_QUEUE_ARGUMENTS
+        ),
+    }
 
 
 def retry_delay_for(attempt: int) -> int:

@@ -22,5 +22,10 @@ class WorkerSettings(BaseAppSettings):
     #: Wait before looking again at a job that another worker currently holds.
     in_progress_recheck_seconds: int = 30
 
+    #: How often the worker confirms it is still subscribed to the job queue.
+    #: RabbitMQ drops a subscription without notice when the queue is deleted,
+    #: and the client library only reinstates subscriptions after a reconnect.
+    subscription_check_seconds: int = 10
+
 
 settings = WorkerSettings()

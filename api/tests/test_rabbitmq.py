@@ -1,11 +1,14 @@
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import aio_pika
 import pytest
 from aio_pika.exceptions import DeliveryError
 
-from app.core.rabbitmq import RabbitMQBroker
+from app.core.config import settings
+from app.core.rabbitmq import PROBE_EXCHANGE, RabbitMQBroker
 from app.exceptions import QueueUnavailableError
 from app.services import queue_service
 
@@ -77,3 +80,50 @@ class TestPublishJob:
 
         with pytest.raises(QueueUnavailableError):
             await queue_service.publish_job(uuid.uuid4(), uuid.uuid4())
+
+
+class TestReadiness:
+    async def test_ready_when_the_broker_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        broker = RabbitMQBroker()
+        broker._probe = AsyncMock()
+
+        assert await broker.is_ready() is True
+
+    async def test_not_ready_when_the_probe_fails(self) -> None:
+        broker = RabbitMQBroker()
+        broker._probe = AsyncMock(side_effect=ConnectionError("refused"))
+
+        assert await broker.is_ready() is False
+
+    async def test_not_ready_when_the_broker_does_not_answer_in_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """While reconnecting, a call waits for the connection instead of
+        failing, so without a timeout the probe would hang."""
+        monkeypatch.setattr(settings, "rabbitmq_probe_timeout_seconds", 0.05)
+        broker = RabbitMQBroker()
+
+        async def hang() -> None:
+            await asyncio.sleep(10)
+
+        broker._probe = hang
+
+        assert await broker.is_ready() is False
+
+    async def test_probe_makes_a_round_trip_without_leaving_anything_behind(self) -> None:
+        """Handing out a pooled channel involves no I/O, so it cannot show the
+        broker is up. A passive, non-robust declaration does, and adds nothing
+        to what the library replays after a reconnect."""
+        broker = RabbitMQBroker()
+        channel = MagicMock()
+        channel.declare_exchange = AsyncMock()
+
+        @asynccontextmanager
+        async def acquire():
+            yield channel
+
+        broker._acquire = acquire
+
+        await broker._probe()
+
+        channel.declare_exchange.assert_awaited_once_with(PROBE_EXCHANGE, passive=True, robust=False)

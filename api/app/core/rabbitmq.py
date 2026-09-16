@@ -22,6 +22,9 @@ from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
+#: Built into every RabbitMQ virtual host, so it always exists.
+PROBE_EXCHANGE = "amq.direct"
+
 
 class NotConnectedError(RuntimeError):
     def __init__(self) -> None:
@@ -59,9 +62,7 @@ class RabbitMQBroker:
 
     @asynccontextmanager
     async def channel(self) -> AsyncIterator[AbstractChannel]:
-        if self._channels is None:
-            raise NotConnectedError()
-        async with self._channels.acquire() as channel:
+        async with self._acquire() as channel:
             await self._ensure_queues(channel)
             yield channel
 
@@ -85,13 +86,39 @@ class RabbitMQBroker:
             await self._publish_once(message, routing_key)
 
     async def is_ready(self) -> bool:
-        """Whether the broker can currently be reached."""
+        """Whether the broker can currently be reached.
+
+        Takes a real round trip. Acquiring a channel is not enough: the pool
+        hands back an existing channel without checking it, so that alone
+        reports ready while the broker is down.
+
+        The probe passively declares ``amq.direct``, an exchange every broker
+        has. It leaves nothing behind and cannot fail because of this service's
+        own queues — a missing queue does not stop uploads, since publishing
+        declares it again. It is bounded by a timeout because, while the
+        connection is being re-established, the call waits for it rather than
+        failing.
+        """
         try:
-            async with self.channel():
-                return True
+            await asyncio.wait_for(self._probe(), timeout=settings.rabbitmq_probe_timeout_seconds)
+            return True
         except Exception:
             log.warning("RabbitMQ is not reachable", exc_info=True)
             return False
+
+    async def _probe(self) -> None:
+        async with self._acquire() as channel:
+            # Not robust: a robust declaration is remembered for replay after
+            # every reconnect and never forgotten, so probing that way would
+            # grow without bound.
+            await channel.declare_exchange(PROBE_EXCHANGE, passive=True, robust=False)
+
+    @asynccontextmanager
+    async def _acquire(self) -> AsyncIterator[AbstractChannel]:
+        if self._channels is None:
+            raise NotConnectedError()
+        async with self._channels.acquire() as channel:
+            yield channel
 
     async def _publish_once(self, message: aio_pika.Message, routing_key: str) -> None:
         async with self.channel() as channel:
