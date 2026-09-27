@@ -2,11 +2,17 @@
 
 Downstream stages (ontology proposal, graph building) read only
 ``NormalizedData``, so they are unaffected by which format the data arrived in.
+
+Rows are carried as a DataFrame rather than as a list of dictionaries. A
+dictionary per row costs about nine times the size of the file it came from,
+where a DataFrame costs about four, and the DataFrame is what gets written to
+Parquet — so the dictionaries would be built only to be thrown away.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+
+import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -27,10 +33,21 @@ class Relationship:
 
 @dataclass
 class Table:
+    """A parsed table.
+
+    ``columns`` is kept alongside the frame rather than derived from it: a SQL
+    dump declares its own types, which say more than the types pandas infers
+    from the values.
+    """
+
     name: str
     columns: list[Column] = field(default_factory=list)
-    rows: list[dict[str, Any]] = field(default_factory=list)
+    frame: pd.DataFrame = field(default_factory=pd.DataFrame)
     relationships: list[Relationship] = field(default_factory=list)
+
+    @property
+    def row_count(self) -> int:
+        return len(self.frame)
 
 
 @dataclass

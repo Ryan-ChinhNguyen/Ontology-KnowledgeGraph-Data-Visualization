@@ -32,9 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import session_factory
+from app.core.storage import storage
 from app.errors import JobNotFoundError, PermanentJobError
 from app.parsers.base import NormalizedData
 from app.parsers.registry import parser_for
+from app.services.dataset_writer import StoredTable, record_tables, write_tables
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +113,7 @@ async def settle_job(
     *,
     job_values: dict,
     session_status: SessionStatus | None,
+    dataset: tuple[list[StoredTable], NormalizedData] | None = None,
 ) -> bool:
     """Record a result, provided the claim is still held.
 
@@ -130,6 +133,10 @@ async def settle_job(
     if written.rowcount == 0:
         await db.rollback()
         return False
+
+    if dataset is not None:
+        stored, parsed = dataset
+        await record_tables(db, claim.session_id, stored, parsed)
 
     if session_status is not None:
         await db.execute(
@@ -194,6 +201,10 @@ async def process_job(message: JobMessage, *, attempt: int, is_final_attempt: bo
         try:
             file_format, paths = await _load_work(db, claim.session_id)
             normalized = parser_for(file_format).parse(paths)
+            # Written before the database is told about them, so a crash in
+            # between leaves files that the next run overwrites rather than
+            # rows pointing at files that were never written.
+            stored = write_tables(storage, claim.session_id, normalized)
         except Exception as error:
             final = is_final_attempt or isinstance(error, PermanentJobError)
             recorded = await settle_job(
@@ -212,6 +223,7 @@ async def process_job(message: JobMessage, *, attempt: int, is_final_attempt: bo
             claim,
             job_values={"status": JobStatus.done, "error_message": None, "completed_at": func.now()},
             session_status=SessionStatus.ready,
+            dataset=(stored, normalized),
         )
         if not recorded:
             log.warning("Job taken over before its result was recorded: job_id=%s", claim.job_id)

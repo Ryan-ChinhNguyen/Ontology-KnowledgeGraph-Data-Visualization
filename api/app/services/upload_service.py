@@ -20,7 +20,7 @@ from app.exceptions import (
     FileTooLargeError,
     UploadConflictError,
 )
-from app.services.storage import FileStorage
+from ontology_shared.storage import FileStorage
 from app.services.validation import safe_filename, validate_upload
 
 log = logging.getLogger(__name__)

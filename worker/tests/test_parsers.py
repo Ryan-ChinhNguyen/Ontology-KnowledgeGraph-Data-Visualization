@@ -11,6 +11,7 @@ from app.parsers.json_parser import JsonParser
 from app.parsers.parquet_parser import ParquetParser
 from app.parsers.registry import parser_for
 from app.parsers.sql_parser import SqlParser
+from tests.conftest import records
 
 
 def write(directory: Path, name: str, text: str, encoding: str = "utf-8") -> str:
@@ -27,7 +28,7 @@ class TestCsvParser:
 
         assert table.name == "people"
         assert [column.name for column in table.columns] == ["id", "name"]
-        assert table.rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+        assert records(table) == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
     def test_strips_the_excel_byte_order_mark(self, tmp_path: Path) -> None:
         path = write(tmp_path, "bom.csv", "id,name\n1,alice\n", encoding="utf-8-sig")
@@ -48,7 +49,7 @@ class TestCsvParser:
 
         table = CsvParser().parse([path]).tables[0]
 
-        assert table.rows[0]["name"] is None
+        assert records(table)[0]["name"] is None
 
     def test_rejects_a_file_that_starts_with_data(self, tmp_path: Path) -> None:
         """Without this the first record is promoted to column names and its
@@ -93,7 +94,7 @@ class TestCsvParser:
 
         table = CsvParser().parse([path]).tables[0]
 
-        assert table.rows == [{"a": 1, "b": 2, "c": None}]
+        assert records(table) == [{"a": 1, "b": 2, "c": None}]
 
     def test_reads_every_file_into_its_own_table(self, tmp_path: Path) -> None:
         first = write(tmp_path, "customers.csv", "id\n1\n")
@@ -111,7 +112,7 @@ class TestJsonParser:
         table = JsonParser().parse([path]).tables[0]
 
         assert table.name == "people"
-        assert table.rows == [{"id": 1, "name": "alice"}]
+        assert records(table) == [{"id": 1, "name": "alice"}]
 
     def test_splits_an_object_root_into_one_table_per_array(self, tmp_path: Path) -> None:
         document = {"customers": [{"id": 1}], "orders": [{"id": 9}]}
@@ -127,7 +128,7 @@ class TestJsonParser:
         table = JsonParser().parse([path]).tables[0]
 
         assert table.name == "config"
-        assert table.rows == [{"id": 1, "name": "alice"}]
+        assert records(table) == [{"id": 1, "name": "alice"}]
 
     def test_flattens_nested_objects_into_dotted_columns(self, tmp_path: Path) -> None:
         document = [{"id": 1, "address": {"city": "Hanoi", "geo": {"lat": 21.0}}}]
@@ -135,7 +136,7 @@ class TestJsonParser:
 
         table = JsonParser().parse([path]).tables[0]
 
-        assert table.rows[0] == {"id": 1, "address.city": "Hanoi", "address.geo.lat": 21.0}
+        assert records(table)[0] == {"id": 1, "address.city": "Hanoi", "address.geo.lat": 21.0}
 
     def test_unions_columns_across_records_with_different_keys(self, tmp_path: Path) -> None:
         path = write(tmp_path, "sparse.json", json.dumps([{"a": 1}, {"b": 2}]))
@@ -171,7 +172,7 @@ class TestParquetParser:
 
         assert table.name == "events"
         assert [column.name for column in table.columns] == ["id", "name"]
-        assert table.rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+        assert records(table) == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
 
 class TestSqlParser:
@@ -197,7 +198,7 @@ class TestSqlParser:
 
         table = SqlParser().parse([path]).tables[0]
 
-        assert table.rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+        assert records(table) == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
     def test_falls_back_to_declared_columns_when_insert_omits_them(self, tmp_path: Path) -> None:
         path = write(
@@ -210,7 +211,7 @@ class TestSqlParser:
 
         table = SqlParser().parse([path]).tables[0]
 
-        assert table.rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+        assert records(table) == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
     def test_records_a_foreign_key_as_a_relationship(self, tmp_path: Path) -> None:
         path = write(
@@ -231,7 +232,7 @@ class TestSqlParser:
 
         table = SqlParser().parse([path]).tables[0]
 
-        assert table.rows == []
+        assert records(table) == []
         assert len(table.columns) == 2
 
     def test_ignores_destructive_statements(self, tmp_path: Path) -> None:
@@ -257,7 +258,7 @@ class TestSqlParser:
 
         table = SqlParser().parse([path]).tables[0]
 
-        assert table.rows == [{"id": 1, "name": None}]
+        assert records(table) == [{"id": 1, "name": None}]
 
     def test_skips_rows_for_a_table_that_was_never_declared(self, tmp_path: Path) -> None:
         path = write(tmp_path, "dump.sql", "INSERT INTO ghost (id) VALUES (1);")

@@ -53,6 +53,46 @@ class UploadResponse(BaseModel):
         )
 
 
+class DatasetColumnResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    position: int
+    inferred_type: str
+
+
+class DatasetTableResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    table_id: uuid.UUID
+    name: str
+    row_count: int
+    columns: list[DatasetColumnResponse]
+
+
+class DatasetTablesResponse(BaseModel):
+    session_id: uuid.UUID
+    tables: list[DatasetTableResponse]
+
+    @classmethod
+    def build(cls, session_id: uuid.UUID, tables: list) -> "DatasetTablesResponse":
+        return cls(
+            session_id=session_id,
+            tables=[DatasetTableResponse.model_validate(table) for table in tables],
+        )
+
+
+class RowPageResponse(BaseModel):
+    """One page of a table's rows, read from the stored Parquet file."""
+
+    table_id: uuid.UUID
+    offset: int
+    limit: int
+    #: Rows in the whole table, so a caller knows how far it can page.
+    total_rows: int
+    rows: list[dict]
+
+
 class SessionStatusResponse(BaseModel):
     model_config = ConfigDict(
         from_attributes=True,

@@ -5,7 +5,7 @@ so removing one shows up as a failing test rather than as a race condition in
 production.
 """
 
-from ontology_shared.models import Base, File, Job, Session
+from ontology_shared.models import Base, DatasetColumn, DatasetTable, File, Job, Session
 
 
 def constraint_names(table) -> set[str]:
@@ -60,6 +60,31 @@ class TestJobsTable:
         assert "ck_jobs_attempt_count_non_negative" in constraint_names(Job.__table__)
 
 
+class TestDatasetTables:
+    def test_a_session_cannot_hold_two_tables_of_the_same_name(self) -> None:
+        assert "uq_dataset_tables_session_name" in constraint_names(DatasetTable.__table__)
+
+    def test_deleting_a_session_removes_what_it_parsed(self) -> None:
+        foreign_key = next(iter(DatasetTable.__table__.c.session_id.foreign_keys))
+        assert foreign_key.ondelete == "CASCADE"
+
+    def test_deleting_a_table_removes_its_columns(self) -> None:
+        foreign_key = next(iter(DatasetColumn.__table__.c.table_id.foreign_keys))
+        assert foreign_key.ondelete == "CASCADE"
+
+    def test_rows_are_referenced_not_stored(self) -> None:
+        """Rows live in Parquet; the database only records where."""
+        assert "parquet_path" in DatasetTable.__table__.c
+        assert not {"rows", "data", "content"} & set(DatasetTable.__table__.c.keys())
+
+
 class TestSchemaScope:
-    def test_only_the_upload_tables_exist(self) -> None:
-        assert set(Base.metadata.tables) == {"sessions", "files", "jobs"}
+    def test_holds_only_the_upload_and_parsed_dataset_tables(self) -> None:
+        assert set(Base.metadata.tables) == {
+            "sessions",
+            "files",
+            "jobs",
+            "dataset_tables",
+            "dataset_columns",
+            "dataset_relationships",
+        }

@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.database import dispose_engine, session_factory
 from app.core.rabbitmq import broker
 from app.middleware import RequestSizeLimit
-from app.routers import upload
+from app.routers import dataset, upload
 
 configure_logging()
 log = logging.getLogger(__name__)
@@ -47,6 +47,13 @@ TAGS_METADATA = [
             "Submit data files and follow their parsing. Uploading returns immediately; "
             "the Worker service parses in the background, so the outcome is read back "
             "from the session endpoint."
+        ),
+    },
+    {
+        "name": "dataset",
+        "description": (
+            "Read what an upload parsed into. Tables and their columns come from the "
+            "database; rows are read a page at a time from the file the parse wrote."
         ),
     },
     {"name": "ops", "description": "Health and liveness."},
@@ -88,6 +95,7 @@ app.add_middleware(
     limit_mb=settings.max_file_size_mb,
 )
 app.include_router(upload.router, prefix="/api")
+app.include_router(dataset.router, prefix="/api")
 
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")

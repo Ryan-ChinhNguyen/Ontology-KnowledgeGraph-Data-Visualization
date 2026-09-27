@@ -2,12 +2,14 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pandas as pd
 import pytest
 from ontology_shared.messaging import JobMessage
 from ontology_shared.models import File, FileFormat, Job, JobStatus, Session, SessionStatus
 from sqlalchemy import delete, select, text, update
 
 from app.core.database import engine, session_factory
+from app.core.storage import storage
 
 
 @pytest.fixture
@@ -69,6 +71,9 @@ async def stored_job(database: None) -> AsyncIterator[JobMessage]:
     async with session_factory() as db:
         await db.execute(delete(Session).where(Session.session_id == session_id))
         await db.commit()
+    # Processing writes Parquet beside the uploads, so the files a test
+    # produced go too.
+    storage.delete(session_id)
 
 
 async def job_row(job_id: uuid.UUID) -> Any:
@@ -87,3 +92,13 @@ async def force_job(job_id: uuid.UUID, **values: Any) -> None:
     async with session_factory() as db:
         await db.execute(update(Job).where(Job.job_id == job_id).values(**values))
         await db.commit()
+
+
+def records(table: Any) -> list[dict[str, Any]]:
+    """A parsed table's rows as dictionaries, for readable comparisons.
+
+    Missing values come back as ``None`` whatever dtype pandas chose, so a gap
+    in a numeric column and a gap in a text column read the same.
+    """
+    frame = table.frame
+    return frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")

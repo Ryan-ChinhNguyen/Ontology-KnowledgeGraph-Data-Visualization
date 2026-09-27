@@ -13,15 +13,13 @@ from app.parsers.base import BaseParser, Column, NormalizedData, Table
 
 
 def table_from_dataframe(name: str, frame: pd.DataFrame) -> Table:
-    """Convert a DataFrame into a Table.
+    """Describe a DataFrame as a Table, keeping the frame itself.
 
-    pandas represents missing values as ``NaN``/``NaT``, which are not valid
-    JSON and would become meaningless node properties, so they are normalised
-    to ``None`` first.
+    Missing values are left as pandas represents them. Parquet stores them as
+    nulls, and whatever reads the file back decides how to present them.
     """
     columns = [Column(name=str(col), inferred_type=str(frame[col].dtype)) for col in frame.columns]
-    rows = frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
-    return Table(name=name, columns=columns, rows=rows)
+    return Table(name=name, columns=columns, frame=frame)
 
 
 class DataFrameParser(BaseParser):

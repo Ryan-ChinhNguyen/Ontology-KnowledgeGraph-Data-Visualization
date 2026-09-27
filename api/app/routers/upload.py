@@ -12,7 +12,7 @@ from app.exceptions import SessionNotFoundError
 from app.models.schemas import ErrorResponse, SessionStatusResponse, UploadResponse
 from app.services.queue_service import publish_job
 from app.services.session_service import delete_session
-from app.services.storage import FileStorage
+from ontology_shared.storage import FileStorage
 from app.services.upload_service import process_upload
 
 log = logging.getLogger(__name__)

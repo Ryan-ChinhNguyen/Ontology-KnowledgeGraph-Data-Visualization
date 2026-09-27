@@ -6,9 +6,11 @@ have no effect beyond being skipped.
 """
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pandas as pd
 import sqlglot
 from sqlglot import expressions as exp
 
@@ -37,6 +39,9 @@ class _ParseState:
     tables: dict[str, Table] = field(default_factory=dict)
     foreign_keys: list[Relationship] = field(default_factory=list)
     declared_columns: dict[str, list[str]] = field(default_factory=dict)
+    #: Rows per table, gathered as the INSERTs are read and turned into frames
+    #: once every statement has been seen.
+    rows: dict[str, list[dict]] = field(default_factory=lambda: defaultdict(list))
 
 
 class SqlParser(BaseParser):
@@ -58,6 +63,13 @@ class SqlParser(BaseParser):
             table = state.tables.get(relationship.from_table)
             if table is not None:
                 table.relationships.append(relationship)
+
+        for name, table in state.tables.items():
+            # An explicit column list keeps a table that was declared but never
+            # populated from becoming a frame with no columns at all.
+            table.frame = pd.DataFrame(
+                state.rows.get(name, []), columns=[column.name for column in table.columns]
+            )
 
         return NormalizedData(tables=list(state.tables.values()))
 
@@ -125,7 +137,7 @@ class SqlParser(BaseParser):
         column_names = listed_columns or state.declared_columns.get(table_name, [])
         for tuple_expression in values.expressions:
             literals = [self._literal(value) for value in tuple_expression.expressions]
-            target.rows.append(dict(zip(column_names, literals)))
+            state.rows[table_name].append(dict(zip(column_names, literals)))
 
     def _insert_target(self, statement: exp.Insert) -> tuple[str, list[str]] | None:
         """Read the destination table and its column list off the statement.

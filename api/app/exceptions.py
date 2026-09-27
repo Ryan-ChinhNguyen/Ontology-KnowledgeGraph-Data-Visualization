@@ -96,6 +96,13 @@ class SessionInUseError(ApiError):
         )
 
 
+class TableNotFoundError(ApiError):
+    status_code = status.HTTP_404_NOT_FOUND
+
+    def __init__(self, table_id: str) -> None:
+        super().__init__(f"Table '{table_id}' not found")
+
+
 class SessionNotFoundError(ApiError):
     status_code = status.HTTP_404_NOT_FOUND
 

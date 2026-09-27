@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from app.errors import FileContentError
 from app.parsers.base import BaseParser, Column, NormalizedData, Table
 
@@ -44,7 +46,11 @@ class JsonParser(BaseParser):
         if not rows:
             return Table(name=name)
 
-        return Table(name=name, columns=self._describe_columns(rows), rows=rows)
+        columns = self._describe_columns(rows)
+        # Built from the flattened records with an explicit column order, which
+        # records that do not share every key would not otherwise agree on.
+        frame = pd.DataFrame(rows, columns=[column.name for column in columns])
+        return Table(name=name, columns=columns, frame=frame)
 
     def _describe_columns(self, rows: list[dict[str, Any]]) -> list[Column]:
         """Derive the column set and each column's type in one pass.
