@@ -105,6 +105,9 @@ class Session(Base):
     jobs: Mapped[list["Job"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    dataset_tables: Mapped[list["DatasetTable"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class File(Base):
@@ -132,6 +135,71 @@ class File(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     session: Mapped["Session"] = relationship(back_populates="files")
+
+
+class DatasetTable(Base):
+    """One table found in an upload, and where its rows were written.
+
+    Rows live in a Parquet file rather than here: they are read once to build
+    the graph and shown a page at a time in between, neither of which the
+    database is the right place for. ``parquet_path`` is opaque to callers so
+    the file can move to an object store without a schema change.
+    """
+
+    __tablename__ = "dataset_tables"
+    __table_args__ = (
+        UniqueConstraint("session_id", "name", name="uq_dataset_tables_session_name"),
+        CheckConstraint("row_count >= 0", name="ck_dataset_tables_row_count_non_negative"),
+    )
+
+    table_id: Mapped[uuid.UUID] = _uuid_pk()
+    session_id: Mapped[uuid.UUID] = _session_fk()
+    name: Mapped[str] = mapped_column(String(255))
+    row_count: Mapped[int] = mapped_column(BigInteger)
+    parquet_path: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    session: Mapped["Session"] = relationship(back_populates="dataset_tables")
+    columns: Mapped[list["DatasetColumn"]] = relationship(
+        back_populates="table", cascade="all, delete-orphan", order_by="DatasetColumn.position"
+    )
+
+
+class DatasetColumn(Base):
+    """A column of a parsed table, in the order it appears in the file."""
+
+    __tablename__ = "dataset_columns"
+    __table_args__ = (
+        UniqueConstraint("table_id", "name", name="uq_dataset_columns_table_name"),
+    )
+
+    column_id: Mapped[uuid.UUID] = _uuid_pk()
+    table_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("dataset_tables.table_id", ondelete="CASCADE"),
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255))
+    position: Mapped[int] = mapped_column(Integer)
+    inferred_type: Mapped[str] = mapped_column(String(64))
+
+    table: Mapped["DatasetTable"] = relationship(back_populates="columns")
+
+
+class DatasetRelationship(Base):
+    """A link between two parsed tables.
+
+    Only formats that declare their own links fill this in — a SQL dump's
+    foreign keys. Links for the others are proposed later, from the data.
+    """
+
+    __tablename__ = "dataset_relationships"
+
+    relationship_id: Mapped[uuid.UUID] = _uuid_pk()
+    session_id: Mapped[uuid.UUID] = _session_fk()
+    from_table: Mapped[str] = mapped_column(String(255))
+    to_table: Mapped[str] = mapped_column(String(255))
+    type: Mapped[str] = mapped_column(String(64))
 
 
 class Job(Base):

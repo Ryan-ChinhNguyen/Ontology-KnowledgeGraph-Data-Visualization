@@ -1,31 +1,41 @@
-"""Consumes job messages and decides what happens to one that fails.
+"""Consumes job messages and decides what happens to each delivery.
 
-The original message is acknowledged only after the job has been dealt with
-for good — either processed successfully, or safely handed to a holding queue
-or the dead-letter queue. Every hand-off is published with confirms, so the
-acknowledgement follows the broker's own guarantee that the next copy is
-stored. A crash between the two produces a duplicate rather than a loss, and
-the Worker's idempotency check makes a duplicate a no-op.
+The original message is acknowledged only once the job has been dealt with:
+processed, found already settled, or handed on to the retry or dead-letter
+queue. Every hand-off is published with confirms and as mandatory, so the
+acknowledgement follows the broker's guarantee that the next copy is stored in
+a queue that exists. A crash between the two produces a duplicate rather than
+a loss, and claiming a job before running it makes a duplicate harmless.
+
+No exception is allowed to escape the callback. A delivery that is neither
+acknowledged nor rejected stays assigned to this consumer, and with a prefetch
+of one that stops the worker from receiving anything else.
+
+The subscription itself is also watched. When its queue is deleted, RabbitMQ
+cancels the subscription and the client library discards it silently; the
+library only resubscribes after a lost connection, which a deleted queue does
+not cause. Without the watch the worker would stay up but never receive work.
 """
 
 import asyncio
 import logging
+from typing import Any
 
 import aio_pika
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel
+from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, ConsumerTag
+from aio_pika.exceptions import DeliveryError
 from ontology_shared.messaging import (
     DEAD_QUEUE,
     JOB_QUEUE,
-    JOB_QUEUE_ARGUMENTS,
     RETRY_QUEUE,
-    RETRY_QUEUE_ARGUMENTS,
     JobMessage,
+    declare_topology,
     retry_delay_for,
 )
 
 from app.core.config import settings
 from app.errors import PermanentJobError
-from app.services.job_processor import process_job
+from app.services.job_processor import Outcome, process_job
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +44,8 @@ class JobConsumer:
     def __init__(self, max_attempts: int = settings.max_retry_attempts) -> None:
         self._max_attempts = max_attempts
         self._channel: AbstractRobustChannel | None = None
+        self._queues: dict[str, Any] = {}
+        self._consumer_tag: ConsumerTag | None = None
 
     async def run(self) -> None:
         """Connect and consume until cancelled.
@@ -47,21 +59,61 @@ class JobConsumer:
         )
 
         async with connection:
-            # Confirms are what let a republished retry be acknowledged safely.
-            self._channel = await connection.channel(publisher_confirms=True)
+            self._channel = await connection.channel(
+                publisher_confirms=True,
+                on_return_raises=True,
+            )
             await self._channel.set_qos(prefetch_count=settings.prefetch_count)
 
-            await self._channel.declare_queue(DEAD_QUEUE, durable=True)
-            await self._channel.declare_queue(
-                RETRY_QUEUE, durable=True, arguments=RETRY_QUEUE_ARGUMENTS
-            )
-            queue = await self._channel.declare_queue(
-                JOB_QUEUE, durable=True, arguments=JOB_QUEUE_ARGUMENTS
-            )
-
-            await queue.consume(self._on_message)
+            self._queues = await declare_topology(self._channel)
+            self._consumer_tag = await self._queues[JOB_QUEUE].consume(self._on_message)
             log.info("Consuming from '%s' (prefetch=%d)", JOB_QUEUE, settings.prefetch_count)
-            await asyncio.Future()
+
+            watch = asyncio.create_task(self._watch_subscription())
+            try:
+                await asyncio.Future()
+            finally:
+                watch.cancel()
+
+    async def _watch_subscription(self) -> None:
+        while True:
+            await asyncio.sleep(settings.subscription_check_seconds)
+            try:
+                await self._ensure_subscribed()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Could not verify the subscription to '%s'", JOB_QUEUE)
+
+    async def _ensure_subscribed(self) -> None:
+        """Resubscribe if the broker has cancelled this worker's subscription.
+
+        Waits for the channel to be ready first. During a reconnect the library
+        restores the subscription itself, under the same consumer tag;
+        subscribing here at the same time would reuse that tag, which the
+        broker rejects by closing the channel.
+
+        The check reads the channel's own list of active subscriptions, so it
+        costs no round trip to the broker.
+        """
+        await self._channel.ready()
+        underlay = await self._channel.get_underlay_channel()
+        if self._consumer_tag in underlay.consumers:
+            return
+
+        log.warning("Subscription to '%s' was cancelled by the broker; resubscribing", JOB_QUEUE)
+        await self._restore_topology()
+        await self._queues[JOB_QUEUE].consume(self._on_message, consumer_tag=self._consumer_tag)
+
+    async def _restore_topology(self) -> None:
+        """Declare again the queues declared at startup.
+
+        Reuses the objects kept from startup: declaring through the channel
+        again would add another copy to what the library replays after every
+        reconnect.
+        """
+        for queue in self._queues.values():
+            await queue.declare()
 
     async def _on_message(self, message: AbstractIncomingMessage) -> None:
         try:
@@ -79,7 +131,7 @@ class JobConsumer:
         log.info("Job received: job_id=%s attempt=%d/%d", job.job_id, attempt, self._max_attempts)
 
         try:
-            await process_job(job, attempt=attempt, is_final_attempt=is_final)
+            result = await process_job(job, attempt=attempt, is_final_attempt=is_final)
         except PermanentJobError:
             # Repeating this would fail identically, so it skips the retries
             # and keeps the dead-letter queue to genuinely unexplained work.
@@ -90,8 +142,26 @@ class JobConsumer:
             await self._on_failure(message, job, attempt, is_final)
             return
 
-        await message.ack()
-        log.info("Job finished: job_id=%s", job.job_id)
+        if result.outcome is Outcome.IN_PROGRESS:
+            # Another worker holds the job. Checking again later — rather than
+            # acknowledging — keeps a message in play in case that worker
+            # dies, since its lease will then expire and this job can be
+            # claimed. The attempt count is left alone: nothing was tried.
+            log.info(
+                "Job held by another worker, rechecking in %ds: job_id=%s",
+                settings.in_progress_recheck_seconds,
+                job.job_id,
+            )
+            await self._move(
+                message,
+                job.encode(),
+                RETRY_QUEUE,
+                delay=settings.in_progress_recheck_seconds,
+            )
+            return
+
+        await self._acknowledge(message)
+        log.info("Job %s: job_id=%s", result.outcome.value, job.job_id)
 
     async def _on_failure(
         self,
@@ -106,9 +176,7 @@ class JobConsumer:
             return
 
         delay = retry_delay_for(attempt)
-        log.warning(
-            "Job failed, retrying in %ds: job_id=%s", delay, job.job_id, exc_info=True
-        )
+        log.warning("Job failed, retrying in %ds: job_id=%s", delay, job.job_id, exc_info=True)
         await self._move(message, job.next_attempt().encode(), RETRY_QUEUE, delay=delay)
 
     async def _move(
@@ -124,11 +192,26 @@ class JobConsumer:
         ``delay`` sets the message's own expiry, which is how a single holding
         queue can serve several wait times.
 
-        ``publish`` returns only once the broker has confirmed the message, so
-        reaching the acknowledgement means the next copy is durably stored. If
-        the publish fails, the exception propagates without acknowledging and
-        the original stays queued for redelivery.
+        A returned message means the target queue has gone; declaring the
+        topology again restores it, so the publish is retried once after that.
+        If the hand-off still fails, the original is handed back to the broker
+        instead of being acknowledged.
         """
+        try:
+            try:
+                await self._publish(body, queue, delay)
+            except DeliveryError:
+                log.warning("Message to '%s' was unroutable; redeclaring queues", queue)
+                await self._restore_topology()
+                await self._publish(body, queue, delay)
+        except Exception:
+            log.exception("Could not hand the message to '%s'; returning it to the queue", queue)
+            await self._requeue(message)
+            return
+
+        await self._acknowledge(message)
+
+    async def _publish(self, body: bytes, queue: str, delay: int | None) -> None:
         await self._channel.default_exchange.publish(
             aio_pika.Message(
                 body=body,
@@ -137,5 +220,20 @@ class JobConsumer:
                 expiration=delay,
             ),
             routing_key=queue,
+            mandatory=True,
         )
-        await message.ack()
+
+    async def _acknowledge(self, message: AbstractIncomingMessage) -> None:
+        try:
+            await message.ack()
+        except Exception:
+            # The channel is gone; the broker redelivers unacknowledged
+            # messages when it closes, and the claim makes that harmless.
+            log.exception("Could not acknowledge message")
+
+    async def _requeue(self, message: AbstractIncomingMessage) -> None:
+        try:
+            await message.nack(requeue=True)
+        except Exception:
+            # The broker returns the message itself when the channel closes.
+            log.exception("Could not return message to the queue")

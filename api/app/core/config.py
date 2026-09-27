@@ -12,6 +12,10 @@ class ApiSettings(BaseAppSettings):
     rabbitmq_connection_pool_size: int = 2
     rabbitmq_channel_pool_size: int = 10
 
+    #: How long the readiness check waits for the broker before reporting it
+    #: unreachable.
+    rabbitmq_probe_timeout_seconds: float = 3.0
+
     @property
     def max_upload_bytes(self) -> int:
         return self.max_file_size_mb * 1024 * 1024

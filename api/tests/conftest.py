@@ -1,32 +1,43 @@
+import io
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from typing import BinaryIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from ontology_shared.models import FileFormat, JobStatus, SessionStatus
+from ontology_shared.storage import FileStorage
 
 from app.core.database import get_db
 from app.dependencies import get_storage
 from app.main import app
-from app.services.storage import FileStorage
 
 
 class InMemoryStorage(FileStorage):
-    """Records what would have been written, so upload tests never touch disk."""
+    """Keeps what would have been written, so tests never touch disk."""
 
     def __init__(self) -> None:
         self.saved: dict[str, bytes] = {}
         self.deleted: list[uuid.UUID] = []
 
-    def save(self, session_id: uuid.UUID, filename: str, content: bytes) -> str:
-        location = f"memory://{session_id}/{filename}"
-        self.saved[location] = content
-        return location
+    def location(self, session_id: uuid.UUID, *parts: str) -> str:
+        return "memory://" + "/".join([str(session_id), *parts])
+
+    @contextmanager
+    def writer(self, location: str) -> Iterator[BinaryIO]:
+        buffer = io.BytesIO()
+        yield buffer
+        self.saved[location] = buffer.getvalue()
+
+    @contextmanager
+    def reader(self, location: str) -> Iterator[BinaryIO]:
+        yield io.BytesIO(self.saved[location])
 
     def delete(self, session_id: uuid.UUID) -> None:
-        prefix = f"memory://{session_id}/"
+        prefix = self.location(session_id) + "/"
         for location in [key for key in self.saved if key.startswith(prefix)]:
             del self.saved[location]
         self.deleted.append(session_id)

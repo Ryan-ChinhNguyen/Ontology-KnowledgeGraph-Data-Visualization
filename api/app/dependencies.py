@@ -2,8 +2,9 @@
 
 from functools import lru_cache
 
+from ontology_shared.storage import FileStorage, LocalFileStorage
+
 from app.core.config import settings
-from app.services.storage import FileStorage, LocalFileStorage
 
 
 @lru_cache(maxsize=1)

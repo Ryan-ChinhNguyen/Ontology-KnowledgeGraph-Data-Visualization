@@ -4,10 +4,10 @@ import logging
 import uuid
 
 from ontology_shared.models import Session, SessionStatus
+from ontology_shared.storage import FileStorage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import SessionInUseError, SessionNotFoundError
-from app.services.storage import FileStorage
 
 log = logging.getLogger(__name__)
 

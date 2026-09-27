@@ -21,11 +21,10 @@ Turn your data into a queryable knowledge graph — no graph expertise needed. P
 
 | Format | Extensions | Notes |
 |--------|------------|-------|
-| CSV / TSV | `.csv`, `.tsv` | Header row required |
+| CSV | `.csv` | Header row required |
 | JSON | `.json` | Flat array and nested objects supported |
 | SQL Dump | `.sql` | DDL + DML |
 | Parquet | `.parquet` | |
-| Excel | `.xlsx` | Planned — not yet implemented |
 
 ---
 
@@ -47,9 +46,7 @@ Files are also checked for exact duplicates via SHA-256 hash.
 The following aspects are validated during processing:
 
 - **Encoding** — UTF-8 required
-- **Structure** — header presence, column count consistency, delimiter detection (CSV)
-- **Content** — null/missing values, duplicate rows, type consistency
-- **Graph readiness** — identifiable primary keys, detectable relationships between entities
+- **Structure** — header presence, column count consistency (CSV)
 
 ---
 
@@ -130,11 +127,28 @@ The API Service acts as the Producer — it publishes a job to RabbitMQ after a 
 
 #### Idempotency
 
-Before processing a job, the Worker checks whether `job_id` already has `status = done` in PostgreSQL. If so, it acknowledges the message and skips processing.
+**The problem.** RabbitMQ may deliver the same job more than once, sometimes to two different workers. If both simply check "is this job done yet?" before starting, both can see "no" and both run it.
 
-**Why:** Retry logic can cause the same job to be delivered more than once. Without idempotency, this would produce duplicate normalized data.
+**The fix: claim the job first.** Before doing any work, a Worker marks the job as its own in the database. The database lets only one Worker succeed at this, even if two try at the same moment. The Worker that wins runs the job; the other one does not.
 
-**Tradeoff:** Adds one DB lookup per job. Negligible in practice but worth noting if job volume grows very large.
+If a Worker fails to claim a job, it looks at why:
+
+| The job is… | The Worker… |
+|-------------|-------------|
+| Already finished (`done` or `failed`) | Skips it |
+| Being worked on by another Worker | Checks again in 30 seconds — this does not count as an attempt |
+| Missing | Sends it to the dead-letter queue |
+
+**A claim expires after 10 minutes.** If a Worker crashes halfway through, the job would otherwise stay "being worked on" forever. Once the claim expires, another Worker can pick the job up.
+
+**A Worker that lost its claim cannot save its result.** A claim can also expire because the Worker was just slow, not dead. When that slow Worker finally finishes, the database refuses its write, so it cannot overwrite the result of the Worker that took over.
+
+**Why:** Without this, one job can run twice, and the two runs can overwrite each other — for example, a job that succeeded ending up marked as failed.
+
+**Tradeoffs:**
+- The 10-minute claim must be longer than any file takes to parse. If it were shorter, a slow job would be started a second time. Only one result is kept, but the work is done twice.
+- If a Worker crashes, its job waits up to 10 minutes before anyone retries it.
+- A finished job is never run again because of a duplicate message. To re-process a `failed` upload, delete the session and upload the file again.
 
 ---
 

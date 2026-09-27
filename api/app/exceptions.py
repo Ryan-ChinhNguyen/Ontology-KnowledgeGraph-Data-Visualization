@@ -81,7 +81,7 @@ class QueueUnavailableError(ApiError):
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
     def __init__(self) -> None:
-        super().__init__("Job queue is unavailable; the upload will be retried automatically")
+        super().__init__("The upload was stored but could not be queued for processing")
 
 
 class SessionInUseError(ApiError):
@@ -94,6 +94,13 @@ class SessionInUseError(ApiError):
             f"Session '{session_id}' is '{current_status}' and cannot be deleted "
             "while it is still being processed"
         )
+
+
+class TableNotFoundError(ApiError):
+    status_code = status.HTTP_404_NOT_FOUND
+
+    def __init__(self, table_id: str) -> None:
+        super().__init__(f"Table '{table_id}' not found")
 
 
 class SessionNotFoundError(ApiError):

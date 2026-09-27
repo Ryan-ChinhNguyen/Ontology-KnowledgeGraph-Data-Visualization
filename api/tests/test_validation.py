@@ -46,7 +46,6 @@ class TestResolveFormat:
         "filename,expected",
         [
             ("data.csv", FileFormat.csv),
-            ("data.tsv", FileFormat.csv),
             ("DATA.CSV", FileFormat.csv),
             ("records.json", FileFormat.json),
             ("dump.sql", FileFormat.sql),
@@ -57,7 +56,9 @@ class TestResolveFormat:
     def test_maps_extension_to_format(self, filename: str, expected: FileFormat) -> None:
         assert resolve_format(filename) == expected
 
-    @pytest.mark.parametrize("filename", ["notes.txt", "book.xlsx", "report.pdf", "noextension"])
+    @pytest.mark.parametrize(
+        "filename", ["notes.txt", "people.tsv", "book.xlsx", "report.pdf", "noextension"]
+    )
     def test_rejects_unsupported_extension(self, filename: str) -> None:
         with pytest.raises(InvalidFileExtensionError):
             resolve_format(filename)
@@ -65,7 +66,7 @@ class TestResolveFormat:
 
 class TestValidateUpload:
     def test_returns_the_shared_format(self) -> None:
-        files = [upload("a.csv"), upload("b.tsv")]
+        files = [upload("a.csv"), upload("b.csv")]
         assert validate_upload(files) == FileFormat.csv
 
     def test_accepts_a_single_file(self) -> None:
@@ -93,6 +94,3 @@ class TestValidateUpload:
     def test_rejects_mixed_formats(self) -> None:
         with pytest.raises(MixedFormatsError):
             validate_upload([upload("data.csv"), upload("data.json")])
-
-    def test_treats_csv_and_tsv_as_one_format(self) -> None:
-        validate_upload([upload("a.csv"), upload("b.tsv"), upload("c.csv")])

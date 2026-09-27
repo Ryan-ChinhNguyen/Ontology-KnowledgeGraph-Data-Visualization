@@ -16,23 +16,17 @@ async def publish_job(job_id: uuid.UUID, session_id: uuid.UUID) -> None:
     The message is persistent and the queue durable, so a broker restart does
     not drop queued work.
     """
-    message = JobMessage(job_id=job_id, session_id=session_id)
+    message = aio_pika.Message(
+        body=JobMessage(job_id=job_id, session_id=session_id).encode(),
+        content_type="application/json",
+        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+    )
 
     try:
-        async with broker.channel() as channel:
-            await channel.default_exchange.publish(
-                aio_pika.Message(
-                    body=message.encode(),
-                    content_type="application/json",
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-                routing_key=JOB_QUEUE,
-            )
+        await broker.publish(message, JOB_QUEUE)
     except Exception as error:
-        # The rows are already committed, so the job is recorded as queued even
-        # though no message exists. That is recoverable: a sweep over jobs left
-        # in `queued` can publish them again, which is safe because the Worker
-        # skips a job it has already finished.
+        # The rows are already committed, so the job stays recorded as queued
+        # with no message behind it. Nothing re-publishes it automatically.
         log.error("Failed to publish job_id=%s: %s", job_id, error)
         raise QueueUnavailableError() from error
 

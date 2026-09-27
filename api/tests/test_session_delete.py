@@ -130,7 +130,7 @@ class TestLocalStorageDelete:
     def test_removing_what_is_already_gone_succeeds(self, tmp_path) -> None:
         """Retrying a delete that failed part-way must not fail on the files
         it already removed."""
-        from app.services.storage import LocalFileStorage
+        from ontology_shared.storage import LocalFileStorage
 
         storage = LocalFileStorage(tmp_path)
         session_id = uuid.uuid4()
@@ -139,7 +139,7 @@ class TestLocalStorageDelete:
         storage.delete(session_id)
 
     def test_removes_only_the_named_session(self, tmp_path) -> None:
-        from app.services.storage import LocalFileStorage
+        from ontology_shared.storage import LocalFileStorage
 
         storage = LocalFileStorage(tmp_path)
         doomed, kept = uuid.uuid4(), uuid.uuid4()
