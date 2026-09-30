@@ -53,6 +53,41 @@ class UploadResponse(BaseModel):
         )
 
 
+class SessionSummary(BaseModel):
+    """One upload in a listing, with enough to recognise and choose it."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: uuid.UUID
+    format: FileFormat
+    status: SessionStatus
+    total_files: int
+    total_size_bytes: int
+    filenames: list[str]
+    created_at: datetime
+
+    @classmethod
+    def build(cls, session: Session) -> "SessionSummary":
+        return cls(
+            session_id=session.session_id,
+            format=session.format,
+            status=session.status,
+            total_files=session.total_files,
+            total_size_bytes=session.total_size_bytes,
+            filenames=[file.original_filename for file in session.files],
+            created_at=session.created_at,
+        )
+
+
+class SessionListResponse(BaseModel):
+    total: int
+    sessions: list[SessionSummary]
+
+    @classmethod
+    def build(cls, sessions: list[Session], total: int) -> "SessionListResponse":
+        return cls(total=total, sessions=[SessionSummary.build(s) for s in sessions])
+
+
 class DatasetColumnResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

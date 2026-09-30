@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from ontology_shared.models import Job, Session
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,9 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.dependencies import get_storage
 from app.exceptions import SessionNotFoundError
-from app.models.schemas import ErrorResponse, SessionStatusResponse, UploadResponse
+from app.models.schemas import (
+    ErrorResponse,
+    SessionListResponse,
+    SessionStatusResponse,
+    UploadResponse,
+)
 from app.services.queue_service import publish_job
-from app.services.session_service import delete_session
+from app.services.session_service import delete_session, list_sessions
 from ontology_shared.storage import FileStorage
 from app.services.upload_service import process_upload
 
@@ -67,6 +72,21 @@ async def upload_files(
 
     log.info("Upload accepted: session_id=%s job_id=%s", session.session_id, job.job_id)
     return UploadResponse.build(session, job)
+
+
+@router.get(
+    "/sessions",
+    response_model=SessionListResponse,
+    summary="List uploads, newest first",
+)
+async def list_uploads(
+    limit: int = Query(20, ge=1, le=100, description="Uploads to return."),
+    offset: int = Query(0, ge=0, description="Uploads to skip."),
+    db: AsyncSession = Depends(get_db),
+) -> SessionListResponse:
+    """Report the uploads on record, so one can be picked to look at."""
+    sessions, total = await list_sessions(db, limit=limit, offset=offset)
+    return SessionListResponse.build(sessions, total)
 
 
 @router.get(

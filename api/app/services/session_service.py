@@ -5,7 +5,9 @@ import uuid
 
 from ontology_shared.models import Session, SessionStatus
 from ontology_shared.storage import FileStorage
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.exceptions import SessionInUseError, SessionNotFoundError
 
@@ -15,6 +17,25 @@ log = logging.getLogger(__name__)
 #: mid-parse would pull the files out from under the Worker, which would then
 #: retry a session that no longer exists.
 DELETABLE_STATUSES = frozenset({SessionStatus.ready, SessionStatus.failed})
+
+
+async def list_sessions(
+    db: AsyncSession, *, limit: int, offset: int
+) -> tuple[list[Session], int]:
+    """Uploads, newest first, with the names of the files in each.
+
+    The total is returned alongside so a caller knows how far it can page.
+    """
+    total = (await db.execute(select(func.count()).select_from(Session))).scalar_one()
+
+    result = await db.execute(
+        select(Session)
+        .options(selectinload(Session.files))
+        .order_by(Session.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(result.scalars()), total
 
 
 async def delete_session(session_id: uuid.UUID, db: AsyncSession, storage: FileStorage) -> None:

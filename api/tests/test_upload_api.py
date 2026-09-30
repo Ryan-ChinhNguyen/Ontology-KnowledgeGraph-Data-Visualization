@@ -219,3 +219,35 @@ class TestQueueOutage:
 
         assert response.status_code == 503
         assert "could not be queued" in response.json()["detail"]
+
+
+class TestListUploads:
+    async def test_lists_uploads_with_their_filenames(
+        self, client: AsyncClient, db: AsyncMock, stored_session: MagicMock
+    ) -> None:
+        """The filenames are what lets someone recognise which upload is which."""
+        stored_session.files = [MagicMock(original_filename="people.csv")]
+        db.execute.return_value.scalars.return_value = [stored_session]
+        db.execute.return_value.scalar_one.return_value = 1
+
+        response = await client.get("/api/sessions")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 1
+        assert body["sessions"][0]["filenames"] == ["people.csv"]
+        assert body["sessions"][0]["session_id"] == str(stored_session.session_id)
+
+    async def test_reports_an_empty_list_when_nothing_was_uploaded(
+        self, client: AsyncClient, db: AsyncMock
+    ) -> None:
+        db.execute.return_value.scalars.return_value = []
+        db.execute.return_value.scalar_one.return_value = 0
+
+        response = await client.get("/api/sessions")
+
+        assert response.json() == {"total": 0, "sessions": []}
+
+    async def test_rejects_a_page_larger_than_the_limit(self, client: AsyncClient) -> None:
+        response = await client.get("/api/sessions?limit=5000")
+        assert response.status_code == 422
