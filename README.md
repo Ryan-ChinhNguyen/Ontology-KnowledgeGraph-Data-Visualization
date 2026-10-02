@@ -12,6 +12,14 @@ Turn your data into a queryable knowledge graph — no graph expertise needed. P
   - [Message Queue — Why RabbitMQ](#message-queue--why-rabbitmq)
   - [Design Patterns](#design-patterns)
   - [Scaling Considerations](#scaling-considerations)
+  - [File Storage at Scale](#file-storage-at-scale)
+  - [RabbitMQ Failure Handling](#rabbitmq-failure-handling)
+- [Running Locally](#running-locally)
+  - [Prerequisites](#prerequisites)
+  - [Setup](#setup)
+  - [Running the Services](#running-the-services)
+  - [Tests](#tests)
+  - [Known Rough Edges](#known-rough-edges)
 
 ---
 
@@ -248,3 +256,108 @@ Worth watching alongside it: the number of jobs sitting in `queued`, and the dep
 An outbox stops jobs from being lost; it does not keep the broker up. Reducing outages themselves is a separate concern — a RabbitMQ cluster with quorum queues survives losing a node — and clustering does not remove the need for an outbox, because the dual write remains.
 
 Two approaches are sometimes suggested and rejected here. **Two-phase commit** across the database and broker is technically possible but performs poorly, blocks on a coordinator failure, and is barely supported by client libraries. **Publishing before writing to the database** only works when the message carries enough to rebuild the state; ours carries identifiers that refer back to rows, so it does not.
+
+---
+
+## Running Locally
+
+Only the backing services run in containers. The API, the Worker and the frontend run on the host — packaging them is deliberately left for later, as `docker-compose.yml` notes.
+
+### Prerequisites
+
+| Tool | Version | Used for |
+|------|---------|----------|
+| Python | 3.12+ | API and Worker; the floor is set in `shared/pyproject.toml` |
+| Node.js | 20+ | Frontend only |
+| Docker | recent | PostgreSQL and RabbitMQ |
+
+PostgreSQL may equally be a native install. In that case start only RabbitMQ from Compose and point the `POSTGRES_*` variables at your own instance.
+
+### Setup
+
+**1. Start the backing services.**
+
+```bash
+docker compose up -d
+```
+
+`docker compose ps` shows when both report healthy. RabbitMQ takes noticeably longer than PostgreSQL.
+
+**2. Create the virtual environment.** One at the repository root, shared by both services.
+
+```bash
+python -m venv .venv
+```
+
+Activate it with `.venv\Scripts\activate` on Windows, or `source .venv/bin/activate` elsewhere.
+
+**3. Install dependencies.** Run these from inside each service directory — `requirements.txt` starts with `-e ../shared`, and pip resolves that relative path against the working directory rather than against the file.
+
+```bash
+cd api && pip install -r requirements.txt -r requirements-dev.txt
+```
+
+```bash
+cd worker && pip install -r requirements.txt -r requirements-dev.txt
+```
+
+**4. Create the configuration files.** The defaults already match `docker-compose.yml`, so they need no editing unless you supplied your own PostgreSQL.
+
+```bash
+cp api/.env.example api/.env
+```
+
+```bash
+cp worker/.env.example worker/.env
+```
+
+`.env` is gitignored because it carries the database password; `.env.example` is the file kept under version control.
+
+**5. Apply the migrations.** The API owns the schema, so Alembic only ever runs from there.
+
+```bash
+cd api && alembic upgrade head
+```
+
+### Running the Services
+
+Three processes, each in its own terminal. Start RabbitMQ before the Worker — see the rough edges below.
+
+```bash
+cd api && python -m uvicorn app.main:app --reload --port 8000
+```
+
+```bash
+cd worker && python -m app.main
+```
+
+```bash
+cd frontend && npm install && npm run dev
+```
+
+| Endpoint | URL |
+|----------|-----|
+| Frontend | `http://localhost:5173` |
+| API | `http://localhost:8000/api` |
+| Swagger UI | `http://localhost:8000/docs` |
+| Liveness / readiness | `http://localhost:8000/health`, `/health/ready` |
+| RabbitMQ management | `http://localhost:15672` (`guest` / `guest`) |
+
+`/health/ready` reports PostgreSQL and RabbitMQ separately, so a `503` points at which one has not started.
+
+### Tests
+
+```bash
+cd api && pytest
+```
+
+```bash
+cd worker && pytest
+```
+
+### Known Rough Edges
+
+- **The Worker exits if RabbitMQ is unreachable at startup.** `connect_robust` only reconnects once it has connected successfully at least once, so a failure on the very first attempt is fatal. The API does not share this problem — it starts regardless and reports `503` from `/health/ready` until the broker appears. Start the broker first, or restart the Worker after it comes up.
+- **Vite binds to `[::1]` only.** Use `http://localhost:5173`; `http://127.0.0.1:5173` will not connect.
+- **The API has to be running before the frontend is of any use.** Vite proxies `/api` to `http://127.0.0.1:8000`, so without it every request comes back as a proxy error.
+- **On Windows, `npm` may be missing from a Git Bash `PATH`** immediately after installing Node. Run it from PowerShell, or add `C:\Program Files\nodejs` to the `PATH`.
