@@ -117,6 +117,71 @@ class DatasetTablesResponse(BaseModel):
         )
 
 
+class GraphNodeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    table_id: uuid.UUID
+    name: str
+    row_count: int
+    column_count: int
+
+
+class GraphEdgeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    relationship_id: uuid.UUID
+    from_table_id: uuid.UUID
+    to_table_id: uuid.UUID
+    from_table: str
+    to_table: str
+    #: Comma-joined where the link is on a composite key, and absent for a
+    #: reference written without a column list.
+    from_column: str | None
+    to_column: str | None
+    type: str
+
+
+class SessionGraphResponse(BaseModel):
+    """An upload's tables as nodes and their declared links as edges."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: uuid.UUID
+    nodes: list[GraphNodeResponse]
+    edges: list[GraphEdgeResponse]
+
+
+class RowNodeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    table: str
+    label: str
+    row: dict
+
+
+class RowEdgeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    source: str
+    target: str
+    label: str
+
+
+class TableGraphResponse(BaseModel):
+    """One table's rows, and the rows they reference, as a graph."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    table_id: uuid.UUID
+    root_table: str
+    nodes: list[RowNodeResponse]
+    edges: list[RowEdgeResponse]
+    #: True when the table holds more rows than were drawn.
+    truncated: bool
+
+
 class RowPageResponse(BaseModel):
     """One page of a table's rows, read from the stored Parquet file."""
 
