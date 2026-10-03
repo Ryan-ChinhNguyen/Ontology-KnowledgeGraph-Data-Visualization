@@ -18,6 +18,45 @@ const ZOOM_STEP = 1.35
 //: trade than an unreadable picture.
 const MIN_READABLE_ZOOM = 0.75
 
+//: Nodes can be dragged, so the same options are needed twice: once when the
+//: graph is built and again whenever the user asks for the arrangement back.
+const LAYOUT = {
+  name: 'cose',
+  animate: true,
+  animationDuration: 500,
+  padding: 45,
+  // Above the defaults, because each circle carries a label underneath it that
+  // the layout does not measure and that would otherwise run into the node
+  // below.
+  nodeRepulsion: () => 50000,
+  idealEdgeLength: () => 190,
+  nodeOverlap: 36,
+  componentSpacing: 120,
+  gravity: 0.4,
+  randomize: true,
+} as cytoscape.LayoutOptions
+
+/** Fitting a sparse graph can leave the labels too small to read. */
+function clampZoom(instance: cytoscape.Core): void {
+  if (instance.zoom() < MIN_READABLE_ZOOM) {
+    instance.zoom(MIN_READABLE_ZOOM)
+    instance.center()
+  }
+}
+
+/** Arrange the nodes, and hand back the run so it can be stopped.
+ *
+ *  The options are copied on every run because cytoscape keeps a reference to
+ *  the object it is handed and fills it in — passing the same one twice leaves
+ *  the second run doing nothing at all.
+ */
+function runLayout(instance: cytoscape.Core): cytoscape.Layouts {
+  const layout = instance.layout({ ...LAYOUT })
+  layout.one('layoutstop', () => clampZoom(instance))
+  layout.run()
+  return layout
+}
+
 interface Drill {
   tableId: string
   tableName: string
@@ -168,6 +207,7 @@ export function GraphView({ session, onViewRows }: Props) {
 
   const container = useRef<HTMLDivElement>(null)
   const graphRef = useRef<cytoscape.Core | null>(null)
+  const layoutRef = useRef<cytoscape.Layouts | null>(null)
 
   const sessionId = session?.session_id ?? null
   const status = session?.status
@@ -227,35 +267,22 @@ export function GraphView({ session, onViewRows }: Props) {
   useEffect(() => {
     if (!container.current || !elements || elements.length === 0) return
 
+    // Cytoscape binds mouse listeners to the element it is given and leaves
+    // them there when it is destroyed, so rebuilding the graph on the same
+    // element would have the old instance still answering events. Each run
+    // gets a host of its own, which is removed with it.
+    const host = document.createElement('div')
+    host.style.width = '100%'
+    host.style.height = '100%'
+    container.current.appendChild(host)
+
     const instance = cytoscape({
-      container: container.current,
+      container: host,
       elements,
       style: stylesheet(),
       minZoom: 0.15,
       maxZoom: 3,
       wheelSensitivity: 0.2,
-      layout: {
-        name: 'cose',
-        animate: true,
-        animationDuration: 500,
-        padding: 45,
-        // Above the defaults, because each circle carries a label underneath
-        // it that the layout does not measure and that would otherwise run
-        // into the node below.
-        nodeRepulsion: () => 50000,
-        idealEdgeLength: () => 190,
-        nodeOverlap: 36,
-        componentSpacing: 120,
-        gravity: 0.4,
-        randomize: true,
-      } as cytoscape.LayoutOptions,
-    })
-
-    instance.one('layoutstop', () => {
-      if (instance.zoom() < MIN_READABLE_ZOOM) {
-        instance.zoom(MIN_READABLE_ZOOM)
-        instance.center()
-      }
     })
 
     instance.on('tap', 'node', (event) => setSelectedId(event.target.id()))
@@ -266,8 +293,15 @@ export function GraphView({ session, onViewRows }: Props) {
     })
 
     graphRef.current = instance
+    layoutRef.current = runLayout(instance)
+
     return () => {
+      // The layout animates, and a run still in flight when the graph goes
+      // away keeps calling back into a core that no longer exists.
+      layoutRef.current?.stop()
+      layoutRef.current = null
       instance.destroy()
+      host.remove()
       graphRef.current = null
     }
   }, [elements])
@@ -394,6 +428,18 @@ export function GraphView({ session, onViewRows }: Props) {
         </button>
         <button type="button" onClick={() => graphRef.current?.fit(undefined, 40)}>
           Fit
+        </button>
+        <button
+          type="button"
+          title="Arrange the nodes again, undoing anything dragged out of place"
+          onClick={() => {
+            const instance = graphRef.current
+            if (!instance) return
+            layoutRef.current?.stop()
+            layoutRef.current = runLayout(instance)
+          }}
+        >
+          Re-layout
         </button>
         <span className="hint">
           {drill
