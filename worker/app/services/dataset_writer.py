@@ -122,5 +122,7 @@ async def record_tables(
                     type=link.type,
                     from_column=link.from_column or None,
                     to_column=link.to_column or None,
+                    name=link.name or None,
+                    inverse_name=link.inverse_name or None,
                 )
             )

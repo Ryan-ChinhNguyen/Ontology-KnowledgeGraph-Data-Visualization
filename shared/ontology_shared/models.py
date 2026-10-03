@@ -206,6 +206,12 @@ class DatasetRelationship(Base):
     type: Mapped[str] = mapped_column(String(64))
     from_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
     to_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: How the link reads in each direction — "belongs to" one way, "has many"
+    #: the other. Stored rather than worked out when drawing, because the
+    #: ontology stage will propose these names and they have to outlive the
+    #: request that produced them.
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    inverse_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class Job(Base):

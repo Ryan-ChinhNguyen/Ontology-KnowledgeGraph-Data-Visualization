@@ -47,6 +47,8 @@ def link_mock(
     link.from_column = from_column
     link.to_column = to_column
     link.type = "FOREIGN_KEY"
+    link.name = "belongs to"
+    link.inverse_name = "has many"
     return link
 
 
@@ -90,6 +92,7 @@ class TestSessionGraph:
         assert edge["from_table_id"] == str(orders.table_id)
         assert edge["to_table_id"] == str(customers.table_id)
         assert edge["from_column"] == "customer_id"
+        assert (edge["name"], edge["inverse_name"]) == ("belongs to", "has many")
 
     async def test_a_link_to_a_table_this_session_never_parsed_is_dropped(
         self, client: AsyncClient, db: AsyncMock, stored_session: MagicMock

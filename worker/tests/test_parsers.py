@@ -228,6 +228,40 @@ class TestSqlParser:
         assert link.to_table == "customers"
         assert link.type == "FOREIGN_KEY"
         assert (link.from_column, link.to_column) == ("customer_id", "id")
+        # The column names the table it points at, so the plain phrasing fits.
+        assert (link.name, link.inverse_name) == ("belongs to", "has many")
+
+    def test_names_a_link_after_the_role_its_column_gives_it(self, tmp_path: Path) -> None:
+        """``manager_id`` pointing at ``employees`` is not just "belongs to"."""
+        path = write(
+            tmp_path,
+            "dump.sql",
+            "CREATE TABLE employees (id INTEGER PRIMARY KEY, "
+            "manager_id INTEGER REFERENCES employees(id));",
+        )
+
+        table = SqlParser().parse([path]).tables[0]
+
+        assert table.relationships[0].name == "belongs to manager"
+        assert table.relationships[0].inverse_name == "has many manager"
+
+    def test_a_column_that_names_no_role_gets_the_plain_phrasing(self, tmp_path: Path) -> None:
+        """``sku`` is a key, not a role, and ``paid`` only happens to end in id."""
+        path = write(
+            tmp_path,
+            "dump.sql",
+            "CREATE TABLE products (sku TEXT PRIMARY KEY);\n"
+            "CREATE TABLE invoices (id INTEGER PRIMARY KEY, paid INTEGER);\n"
+            "CREATE TABLE orders (sku TEXT REFERENCES products(sku), "
+            "paid INTEGER REFERENCES invoices(paid));",
+        )
+
+        tables = {table.name: table for table in SqlParser().parse([path]).tables}
+
+        assert [link.name for link in tables["orders"].relationships] == [
+            "belongs to",
+            "belongs to",
+        ]
 
     def test_records_a_foreign_key_declared_on_the_column(self, tmp_path: Path) -> None:
         path = write(

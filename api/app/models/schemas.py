@@ -139,6 +139,9 @@ class GraphEdgeResponse(BaseModel):
     from_column: str | None
     to_column: str | None
     type: str
+    #: How the link reads along the arrow, and against it.
+    name: str | None
+    inverse_name: str | None
 
 
 class SessionGraphResponse(BaseModel):

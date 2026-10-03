@@ -14,7 +14,14 @@ import pandas as pd
 import sqlglot
 from sqlglot import expressions as exp
 
-from app.parsers.base import BaseParser, Column, NormalizedData, Relationship, Table
+from app.parsers.base import (
+    BaseParser,
+    Column,
+    NormalizedData,
+    Relationship,
+    Table,
+    foreign_key_names,
+)
 
 log = logging.getLogger(__name__)
 
@@ -139,12 +146,16 @@ class SqlParser(BaseParser):
             return None
 
         to_table, to_column = target
+        from_column = COLUMN_SEPARATOR.join(column.name for column in definition.expressions)
+        name, inverse_name = foreign_key_names(from_column, to_table)
         return Relationship(
             from_table=from_table,
             to_table=to_table,
             type="FOREIGN_KEY",
-            from_column=COLUMN_SEPARATOR.join(column.name for column in definition.expressions),
+            from_column=from_column,
             to_column=to_column,
+            name=name,
+            inverse_name=inverse_name,
         )
 
     def _inline_foreign_key(self, from_table: str, definition: exp.ColumnDef) -> Relationship | None:
@@ -159,12 +170,15 @@ class SqlParser(BaseParser):
                 continue
 
             to_table, to_column = target
+            name, inverse_name = foreign_key_names(definition.name, to_table)
             return Relationship(
                 from_table=from_table,
                 to_table=to_table,
                 type="FOREIGN_KEY",
                 from_column=definition.name,
                 to_column=to_column,
+                name=name,
+                inverse_name=inverse_name,
             )
         return None
 

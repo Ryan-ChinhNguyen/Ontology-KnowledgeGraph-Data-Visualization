@@ -3,6 +3,7 @@ import cytoscape from 'cytoscape'
 import { ApiError, api } from '../api'
 import type {
   DatasetTable,
+  GraphEdge,
   RowPage,
   SessionDetail,
   SessionGraph,
@@ -15,8 +16,9 @@ const ZOOM_STEP = 1.35
 
 //: Fitting a sparse graph into the canvas can leave the labels too small to
 //: read, so the opening view never zooms out past this — panning is a better
-//: trade than an unreadable picture.
-const MIN_READABLE_ZOOM = 0.75
+//: trade than an unreadable picture. Every arrow carries text of its own now,
+//: which is what sets the floor.
+const MIN_READABLE_ZOOM = 0.9
 
 //: Nodes can be dragged, so the same options are needed twice: once when the
 //: graph is built and again whenever the user asks for the arrangement back.
@@ -25,14 +27,17 @@ const LAYOUT = {
   animate: true,
   animationDuration: 500,
   padding: 45,
-  // Above the defaults, because each circle carries a label underneath it that
-  // the layout does not measure and that would otherwise run into the node
-  // below.
+  // The circles are small but their labels are not, so the layout is told to
+  // treat each node as the space its label occupies. Without this it packs by
+  // the circles alone and the text lands on top of itself.
+  nodeDimensionsIncludeLabels: true,
   nodeRepulsion: () => 50000,
-  idealEdgeLength: () => 190,
-  nodeOverlap: 36,
+  idealEdgeLength: () => 200,
+  nodeOverlap: 20,
   componentSpacing: 120,
-  gravity: 0.4,
+  // Low, so the spacing above is what decides the shape rather than a pull
+  // towards the middle undoing it.
+  gravity: 0.1,
   randomize: true,
 } as cytoscape.LayoutOptions
 
@@ -52,7 +57,13 @@ function clampZoom(instance: cytoscape.Core): void {
  */
 function runLayout(instance: cytoscape.Core): cytoscape.Layouts {
   const layout = instance.layout({ ...LAYOUT })
-  layout.one('layoutstop', () => clampZoom(instance))
+  // A frame later, because the layout fits the graph to the canvas as the last
+  // thing it does — clamping during `layoutstop` is undone by that fit.
+  layout.one('layoutstop', () =>
+    requestAnimationFrame(() => {
+      if (!instance.destroyed()) clampZoom(instance)
+    }),
+  )
   layout.run()
   return layout
 }
@@ -134,10 +145,10 @@ function stylesheet(): cytoscape.StylesheetJson {
         'text-background-color': bg,
         'text-background-opacity': 1,
         'text-background-padding': '3px',
-        // Hidden until something is selected: on a dense graph the column
-        // pairs collide with the node labels and with each other, and the
-        // ones worth reading are the ones attached to the node in hand.
-        'text-opacity': 0,
+        // Turned along the line it belongs to, which both ties the label to
+        // its own arrow and keeps it clear of the node labels underneath.
+        'text-rotation': 'autorotate',
+        'text-margin-y': -7,
       },
     },
     // Everything outside the selection is pushed back rather than hidden, so
@@ -154,7 +165,6 @@ function stylesheet(): cytoscape.StylesheetJson {
         'target-arrow-color': accent,
         color: accent,
         width: 2,
-        'text-opacity': 1,
       },
     },
     // The selection is the one filled circle, so it reads at a glance against
@@ -164,6 +174,21 @@ function stylesheet(): cytoscape.StylesheetJson {
       style: { 'background-color': accent, 'border-color': accent, color: accent },
     },
   ]
+}
+
+/** How a link is made: the columns it joins through. */
+function edgeColumns(edge: GraphEdge): string {
+  if (!edge.from_column) return edge.type.toLowerCase().replace(/_/g, ' ')
+  return `${edge.from_column} → ${edge.to_column ?? '?'}`
+}
+
+/** What an arrow says: the relation itself, named where the parse named it.
+ *
+ *  Uploads recorded before links carried names fall back to their columns,
+ *  which is what the arrow used to show.
+ */
+function edgeLabel(edge: GraphEdge): string {
+  return edge.name ?? edgeColumns(edge)
 }
 
 function schemaElements(graph: SessionGraph): cytoscape.ElementDefinition[] {
@@ -179,7 +204,7 @@ function schemaElements(graph: SessionGraph): cytoscape.ElementDefinition[] {
         id: edge.relationship_id,
         source: edge.from_table_id,
         target: edge.to_table_id,
-        label: edge.from_column ? `${edge.from_column} → ${edge.to_column ?? ''}` : edge.type,
+        label: edgeLabel(edge),
       },
     })),
   ]
@@ -368,8 +393,8 @@ export function GraphView({ session, onViewRows }: Props) {
         .filter((edge) => edge.source === selectedId || edge.target === selectedId)
         .map((edge) =>
           edge.source === selectedId
-            ? { direction: '→', name: labelOf(edge.target), via: edge.label }
-            : { direction: '←', name: labelOf(edge.source), via: edge.label },
+            ? { direction: '→', phrase: edge.label, name: labelOf(edge.target), columns: '' }
+            : { direction: '←', phrase: edge.label, name: labelOf(edge.source), columns: '' },
         )
     }
 
@@ -377,10 +402,12 @@ export function GraphView({ session, onViewRows }: Props) {
     return graph.edges
       .filter((edge) => edge.from_table_id === selectedId || edge.to_table_id === selectedId)
       .map((edge) => {
-        const via = `${edge.from_column} → ${edge.to_column}`
+        const columns = edgeColumns(edge)
+        // Read from the selected table outwards, so the phrase has to be the
+        // one that matches the direction being looked along.
         return edge.from_table_id === selectedId
-          ? { direction: '→', name: edge.to_table, via }
-          : { direction: '←', name: edge.from_table, via }
+          ? { direction: '→', phrase: edge.name ?? columns, name: edge.to_table, columns }
+          : { direction: '←', phrase: edge.inverse_name ?? columns, name: edge.from_table, columns }
       })
   }, [drill, rowGraph, graph, selectedId])
 
@@ -557,8 +584,11 @@ export function GraphView({ session, onViewRows }: Props) {
 
 interface Link {
   direction: string
+  /** How the relation reads, looking along this direction. */
+  phrase: string
   name: string
-  via: string
+  /** How it is made — empty where the columns are not the point. */
+  columns: string
 }
 
 function LinkList({ links }: { links: Link[] }) {
@@ -569,8 +599,9 @@ function LinkList({ links }: { links: Link[] }) {
       {links.map((link, index) => (
         <li key={index}>
           <span className="direction">{link.direction}</span>
+          <span className="phrase">{link.phrase}</span>
           <strong>{link.name}</strong>
-          <span className="hint">{link.via}</span>
+          {link.columns && <span className="hint">{link.columns}</span>}
         </li>
       ))}
     </ul>

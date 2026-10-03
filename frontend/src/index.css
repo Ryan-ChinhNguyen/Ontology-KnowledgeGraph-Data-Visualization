@@ -637,6 +637,11 @@ ul.neighbours .hint {
   width: 14px;
 }
 
+.phrase {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
 dl.fields {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

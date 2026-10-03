@@ -37,6 +37,44 @@ class Relationship:
     type: str
     from_column: str = ""
     to_column: str = ""
+    #: How the link reads, in each direction. Stored rather than derived at
+    #: display time because a link proposed later will be *named* by whatever
+    #: proposes it, and that name has to survive.
+    name: str = ""
+    inverse_name: str = ""
+
+
+def _singular(word: str) -> str:
+    return word[:-1] if len(word) > 2 and word.endswith("s") else word
+
+
+def foreign_key_names(from_column: str, to_table: str) -> tuple[str, str]:
+    """Read a foreign key as a phrase, forwards and backwards.
+
+    A foreign key always means the same thing — the row holding it belongs to
+    the row it points at — so the plain phrasing is right for every one of
+    them. Where the column names a role the target table does not, such as
+    ``manager_id`` pointing at ``employees``, that role is worth keeping.
+
+    This is deliberately mechanical. Naming a relation well is a question about
+    meaning, and that is the ontology stage's job; these are the names it will
+    replace, not compete with.
+    """
+    lowered = from_column.lower()
+
+    # Only a ``_id`` suffix, or the bare word, marks a column as naming a role.
+    # Matching a plain ``id`` ending would read ``paid`` as the role ``pa``, and
+    # a column like ``sku`` names no role at all.
+    if lowered == "id":
+        role = ""
+    elif lowered.endswith("_id"):
+        role = lowered[: -len("_id")]
+    else:
+        return "belongs to", "has many"
+
+    if not role or _singular(role) == _singular(to_table.lower()):
+        return "belongs to", "has many"
+    return f"belongs to {role}", f"has many {role}"
 
 
 @dataclass

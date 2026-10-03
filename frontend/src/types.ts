@@ -63,6 +63,8 @@ export interface GraphEdge {
   from_column: string | null
   to_column: string | null
   type: string
+  name: string | null
+  inverse_name: string | null
 }
 
 export interface SessionGraph {

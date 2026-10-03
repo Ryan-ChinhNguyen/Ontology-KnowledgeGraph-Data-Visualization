@@ -56,6 +56,8 @@ class GraphEdge:
     from_column: str | None
     to_column: str | None
     type: str
+    name: str | None
+    inverse_name: str | None
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,8 @@ async def build_session_graph(session_id: uuid.UUID, db: AsyncSession) -> Sessio
                 from_column=link.from_column,
                 to_column=link.to_column,
                 type=link.type,
+                name=link.name,
+                inverse_name=link.inverse_name,
             )
         )
 
@@ -229,7 +233,7 @@ async def build_table_graph(
         for edge in _match(
             source=(link.from_table, source_rows, from_column),
             target=(link.to_table, target_rows, to_column),
-            label=f"{from_column} → {to_column}",
+            label=link.name or f"{from_column} → {to_column}",
         ):
             # A dump can declare the same foreign key twice — inline on the
             # column and again as a constraint — and the two would otherwise
