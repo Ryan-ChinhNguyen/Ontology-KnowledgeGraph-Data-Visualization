@@ -24,11 +24,19 @@ class Column:
 @dataclass(frozen=True)
 class Relationship:
     """A link between two tables. Populated from foreign keys where the source
-    declares them; inferred later for formats that do not."""
+    declares them; inferred later for formats that do not.
+
+    The columns are what make the link usable: without them a relationship says
+    two tables are connected but not how, which is not enough to follow an edge
+    from one row to another. A composite key is joined into one string rather
+    than becoming several relationships, because it is one link, not many.
+    """
 
     from_table: str
     to_table: str
     type: str
+    from_column: str = ""
+    to_column: str = ""
 
 
 @dataclass

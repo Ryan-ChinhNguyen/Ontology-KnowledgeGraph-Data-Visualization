@@ -224,8 +224,67 @@ class TestSqlParser:
 
         tables = {table.name: table for table in SqlParser().parse([path]).tables}
 
-        assert tables["orders"].relationships[0].to_table == "customers"
-        assert tables["orders"].relationships[0].type == "FOREIGN_KEY"
+        link = tables["orders"].relationships[0]
+        assert link.to_table == "customers"
+        assert link.type == "FOREIGN_KEY"
+        assert (link.from_column, link.to_column) == ("customer_id", "id")
+
+    def test_records_a_foreign_key_declared_on_the_column(self, tmp_path: Path) -> None:
+        path = write(
+            tmp_path,
+            "dump.sql",
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY);\n"
+            "CREATE TABLE orders (id INTEGER, customer_id INTEGER REFERENCES customers(id));",
+        )
+
+        tables = {table.name: table for table in SqlParser().parse([path]).tables}
+
+        link = tables["orders"].relationships[0]
+        assert (link.to_table, link.from_column, link.to_column) == ("customers", "customer_id", "id")
+
+    def test_records_a_foreign_key_added_by_alter_table(self, tmp_path: Path) -> None:
+        """The form pg_dump writes: tables first, constraints afterwards."""
+        path = write(
+            tmp_path,
+            "dump.sql",
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY);\n"
+            "CREATE TABLE orders (id INTEGER, customer_id INTEGER);\n"
+            "ALTER TABLE ONLY orders ADD CONSTRAINT fk_customer "
+            "FOREIGN KEY (customer_id) REFERENCES customers(id);",
+        )
+
+        tables = {table.name: table for table in SqlParser().parse([path]).tables}
+
+        link = tables["orders"].relationships[0]
+        assert (link.to_table, link.from_column, link.to_column) == ("customers", "customer_id", "id")
+
+    def test_a_composite_foreign_key_stays_one_relationship(self, tmp_path: Path) -> None:
+        path = write(
+            tmp_path,
+            "dump.sql",
+            "CREATE TABLE parts (plant INTEGER, part INTEGER, PRIMARY KEY (plant, part));\n"
+            "CREATE TABLE builds (plant INTEGER, part INTEGER, "
+            "FOREIGN KEY (plant, part) REFERENCES parts(plant, part));",
+        )
+
+        tables = {table.name: table for table in SqlParser().parse([path]).tables}
+
+        assert len(tables["builds"].relationships) == 1
+        link = tables["builds"].relationships[0]
+        assert (link.from_column, link.to_column) == ("plant,part", "plant,part")
+
+    def test_an_alter_that_is_not_a_constraint_is_ignored(self, tmp_path: Path) -> None:
+        """ALTER is read for foreign keys only; nothing in it is executed."""
+        path = write(
+            tmp_path,
+            "dump.sql",
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY);\n"
+            "ALTER TABLE customers OWNER TO postgres;",
+        )
+
+        tables = {table.name: table for table in SqlParser().parse([path]).tables}
+
+        assert tables["customers"].relationships == []
 
     def test_keeps_a_table_that_has_no_rows(self, tmp_path: Path) -> None:
         path = write(tmp_path, "dump.sql", "CREATE TABLE empty_table (id INTEGER, label TEXT);")
