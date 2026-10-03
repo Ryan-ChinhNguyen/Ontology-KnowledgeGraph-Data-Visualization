@@ -97,8 +97,23 @@ async def record_tables(
         ]
         db.add(record)
 
+    # A dump may declare the same foreign key twice — inline on the column and
+    # again as a constraint — and storing it twice would draw the same edge
+    # twice later on.
+    written: set[tuple[str, str, str, str, str]] = set()
     for parsed in data.tables:
         for link in parsed.relationships:
+            identity = (
+                link.from_table,
+                link.to_table,
+                link.from_column,
+                link.to_column,
+                link.type,
+            )
+            if identity in written:
+                continue
+            written.add(identity)
+
             db.add(
                 DatasetRelationship(
                     session_id=session_id,

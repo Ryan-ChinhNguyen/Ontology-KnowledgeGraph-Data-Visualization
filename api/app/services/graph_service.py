@@ -7,6 +7,7 @@ and the two queries are stitched into nodes and edges.
 """
 
 import logging
+import math
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -30,6 +31,11 @@ NEIGHBOUR_ROW_CAP = 500
 
 #: Separates the parts of a composite key, as the parser joined them.
 COLUMN_SEPARATOR = ","
+
+#: A join column that repeats on both sides multiplies out: 200 rows each
+#: matching 500 would be 100,000 edges, long past the point where the picture
+#: says anything. Drawing stops here and the result is marked as partial.
+MAX_ROW_EDGES = 2000
 
 
 @dataclass(frozen=True)
@@ -210,6 +216,9 @@ async def build_table_graph(
             )
 
     edges: list[RowEdge] = []
+    seen: set[str] = set()
+    capped = False
+
     for link, columns in usable:
         source_rows = rows_by_table.get(link.from_table)
         target_rows = rows_by_table.get(link.to_table)
@@ -217,13 +226,26 @@ async def build_table_graph(
             continue
 
         from_column, to_column = columns
-        edges.extend(
-            _match(
-                source=(link.from_table, source_rows, from_column),
-                target=(link.to_table, target_rows, to_column),
-                label=f"{from_column} → {to_column}",
-            )
-        )
+        for edge in _match(
+            source=(link.from_table, source_rows, from_column),
+            target=(link.to_table, target_rows, to_column),
+            label=f"{from_column} → {to_column}",
+        ):
+            # A dump can declare the same foreign key twice — inline on the
+            # column and again as a constraint — and the two would otherwise
+            # produce the same edge, which the renderer rejects as a duplicate.
+            if edge.id in seen:
+                continue
+            if len(edges) >= MAX_ROW_EDGES:
+                capped = True
+                break
+
+            seen.add(edge.id)
+            edges.append(edge)
+
+        if capped:
+            log.info("Row graph for '%s' hit the edge cap", table.name)
+            break
 
     # Every row of the chosen table is drawn, including the ones nothing links
     # to; a neighbouring row is drawn only where an edge reaches it, so the
@@ -241,7 +263,7 @@ async def build_table_graph(
         root_table=table.name,
         nodes=nodes,
         edges=edges,
-        truncated=table.row_count > len(rows_by_table[table.name]),
+        truncated=capped or table.row_count > len(rows_by_table[table.name]),
     )
 
 
@@ -257,18 +279,18 @@ def _match(
 
     index: dict[str, list[str]] = defaultdict(list)
     for position, row in enumerate(target_rows):
-        value = row.get(target_column)
-        if value is not None:
-            index[_key(value)].append(f"{target_name}#{position}")
+        key = _key(row.get(target_column))
+        if key is not None:
+            index[key].append(f"{target_name}#{position}")
 
     edges: list[RowEdge] = []
     for position, row in enumerate(source_rows):
-        value = row.get(source_column)
-        if value is None:
+        key = _key(row.get(source_column))
+        if key is None:
             continue
 
         source_id = f"{source_name}#{position}"
-        for target_id in index.get(_key(value), ()):
+        for target_id in index.get(key, ()):
             edges.append(
                 RowEdge(
                     id=f"{source_id}|{target_id}|{label}",
@@ -299,15 +321,22 @@ def _column_pair(link: DatasetRelationship) -> tuple[str, str] | None:
     return link.from_column, link.to_column
 
 
-def _key(value: Any) -> str:
-    """A join value in a form both sides agree on.
+def _key(value: Any) -> str | None:
+    """A join value in a form both sides agree on, or None if it cannot join.
 
     Parquet can hand back an integer column as a float once it has held a null,
     so the two sides of a key are compared as text with whole floats narrowed
-    first — otherwise 1 and 1.0 would never meet.
+    first — otherwise 1 and 1.0 would never meet. A missing value and a NaN are
+    not values two rows can share, so they join nothing rather than joining
+    every other missing value.
     """
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return str(int(value))
     return str(value)
 
 

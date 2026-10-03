@@ -260,6 +260,71 @@ class TestTableGraph:
 
         assert response.json()["truncated"] is True
 
+    async def test_a_link_declared_twice_draws_one_edge(
+        self,
+        client: AsyncClient,
+        db: AsyncMock,
+        storage: InMemoryStorage,
+        stored_session: MagicMock,
+    ) -> None:
+        """A dump can declare a key inline and again as a constraint."""
+        session_id = stored_session.session_id
+        orders = table_mock(session_id, "orders", row_count=1)
+        customers = table_mock(session_id, "customers", row_count=1)
+
+        write_parquet(
+            storage, orders.parquet_path, pd.DataFrame({"order_id": [10], "customer_id": [1]})
+        )
+        write_parquet(
+            storage, customers.parquet_path, pd.DataFrame({"customer_id": [1], "name": ["Alice"]})
+        )
+
+        db.get.return_value = orders
+        db.execute.side_effect = results(
+            [
+                link_mock(session_id, "orders", "customers"),
+                link_mock(session_id, "orders", "customers"),
+            ],
+            [customers],
+        )
+
+        response = await client.get(f"/api/tables/{orders.table_id}/graph")
+
+        assert len(response.json()["edges"]) == 1
+
+    async def test_rows_with_no_join_value_are_not_joined(
+        self,
+        client: AsyncClient,
+        db: AsyncMock,
+        storage: InMemoryStorage,
+        stored_session: MagicMock,
+    ) -> None:
+        """Two nulls are not a shared value, however they are stored."""
+        session_id = stored_session.session_id
+        orders = table_mock(session_id, "orders", row_count=2)
+        customers = table_mock(session_id, "customers", row_count=1)
+
+        write_parquet(
+            storage,
+            orders.parquet_path,
+            pd.DataFrame({"order_id": [10, 11], "customer_id": [None, 1]}),
+        )
+        write_parquet(
+            storage,
+            customers.parquet_path,
+            pd.DataFrame({"customer_id": [None], "name": ["Nobody"]}),
+        )
+
+        db.get.return_value = orders
+        db.execute.side_effect = results(
+            [link_mock(session_id, "orders", "customers")],
+            [customers],
+        )
+
+        response = await client.get(f"/api/tables/{orders.table_id}/graph")
+
+        assert response.json()["edges"] == []
+
     async def test_an_unknown_table_is_not_found(
         self, client: AsyncClient, db: AsyncMock
     ) -> None:

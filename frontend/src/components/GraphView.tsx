@@ -18,17 +18,6 @@ const ZOOM_STEP = 1.35
 //: trade than an unreadable picture.
 const MIN_READABLE_ZOOM = 0.75
 
-//: One per table in the row graph, so a node's table is readable before it is
-//: clicked. Reused in order and wrapped around when a session has more tables.
-const TABLE_COLOURS = [
-  { fill: '#eef3ff', border: '#2563eb' },
-  { fill: '#e6f5ee', border: '#0a7a4f' },
-  { fill: '#fdf2e0', border: '#9a5b00' },
-  { fill: '#f4edfd', border: '#7c3aed' },
-  { fill: '#fdeded', border: '#c22b2b' },
-  { fill: '#e6f4f8', border: '#0e7490' },
-]
-
 interface Drill {
   tableId: string
   tableName: string
@@ -61,31 +50,34 @@ function stylesheet(): cytoscape.StylesheetJson {
   const font = 'system-ui, -apple-system, Segoe UI, sans-serif'
 
   return [
+    // Every node is the same plain circle with its label underneath. Shape and
+    // colour are left to say one thing only — whether a node is selected,
+    // related to the selection, or neither — so nothing else competes with it.
     {
       selector: 'node',
       style: {
-        shape: 'round-rectangle',
+        shape: 'ellipse',
+        width: 44,
+        height: 44,
         'background-color': panel,
-        'border-width': 1.5,
+        'border-width': 2,
         'border-color': line,
-        width: 'label',
-        height: 'label',
-        padding: '13px',
         label: 'data(label)',
         'text-wrap': 'wrap',
-        'text-valign': 'center',
+        'text-max-width': '130px',
+        'text-valign': 'bottom',
         'text-halign': 'center',
-        'line-height': 1.35,
+        'text-margin-y': 7,
+        'line-height': 1.3,
         'font-size': 11,
         'font-family': font,
         color: text,
+        // Labels sit under the circles and can fall across an edge, so they
+        // carry the canvas colour behind them.
+        'text-background-color': bg,
+        'text-background-opacity': 0.85,
+        'text-background-padding': '2px',
       },
-    },
-    // Row nodes carry their own colour; table nodes do not, and keep the plain
-    // style above.
-    {
-      selector: 'node[fill]',
-      style: { 'background-color': 'data(fill)', 'border-color': 'data(border)' },
     },
     {
       selector: 'edge',
@@ -103,19 +95,34 @@ function stylesheet(): cytoscape.StylesheetJson {
         'text-background-color': bg,
         'text-background-opacity': 1,
         'text-background-padding': '3px',
+        // Hidden until something is selected: on a dense graph the column
+        // pairs collide with the node labels and with each other, and the
+        // ones worth reading are the ones attached to the node in hand.
+        'text-opacity': 0,
       },
     },
     // Everything outside the selection is pushed back rather than hidden, so
     // the shape of the graph stays readable while one part of it is in focus.
     { selector: '.faded', style: { opacity: 0.12, 'text-opacity': 0.08 } },
-    { selector: 'node.related', style: { 'border-color': accent, color: accent } },
     {
-      selector: 'edge.related',
-      style: { 'line-color': accent, 'target-arrow-color': accent, color: accent, width: 2 },
+      selector: 'node.related',
+      style: { 'background-color': accentSoft, 'border-color': accent, color: accent },
     },
     {
+      selector: 'edge.related',
+      style: {
+        'line-color': accent,
+        'target-arrow-color': accent,
+        color: accent,
+        width: 2,
+        'text-opacity': 1,
+      },
+    },
+    // The selection is the one filled circle, so it reads at a glance against
+    // the related nodes, which are only outlined.
+    {
       selector: 'node.focus',
-      style: { 'background-color': accentSoft, 'border-width': 3, 'border-color': accent },
+      style: { 'background-color': accent, 'border-color': accent, color: accent },
     },
   ]
 }
@@ -140,25 +147,10 @@ function schemaElements(graph: SessionGraph): cytoscape.ElementDefinition[] {
 }
 
 function rowElements(graph: TableGraph): cytoscape.ElementDefinition[] {
-  const colours = new Map<string, (typeof TABLE_COLOURS)[number]>()
-  for (const node of graph.nodes) {
-    if (!colours.has(node.table)) {
-      colours.set(node.table, TABLE_COLOURS[colours.size % TABLE_COLOURS.length])
-    }
-  }
-
   return [
-    ...graph.nodes.map((node) => {
-      const colour = colours.get(node.table)!
-      return {
-        data: {
-          id: node.id,
-          label: `${node.table}\n${node.label}`,
-          fill: colour.fill,
-          border: colour.border,
-        },
-      }
-    }),
+    ...graph.nodes.map((node) => ({
+      data: { id: node.id, label: `${node.label}\n${node.table}` },
+    })),
     ...graph.edges.map((edge) => ({
       data: { id: edge.id, source: edge.source, target: edge.target, label: edge.label },
     })),
@@ -247,11 +239,12 @@ export function GraphView({ session, onViewRows }: Props) {
         animate: true,
         animationDuration: 500,
         padding: 45,
-        // Well above the defaults: these are large, boxy nodes, and at the
-        // default spacing they land on top of one another.
-        nodeRepulsion: () => 60000,
+        // Above the defaults, because each circle carries a label underneath
+        // it that the layout does not measure and that would otherwise run
+        // into the node below.
+        nodeRepulsion: () => 50000,
         idealEdgeLength: () => 190,
-        nodeOverlap: 30,
+        nodeOverlap: 36,
         componentSpacing: 120,
         gravity: 0.4,
         randomize: true,
@@ -377,7 +370,9 @@ export function GraphView({ session, onViewRows }: Props) {
     )
   }
 
-  if (error) return <p className="error">{error}</p>
+  // A failed row preview must not take the graph down with it, so the message
+  // is shown beside the canvas rather than instead of it.
+  if (error && !graph) return <p className="error">{error}</p>
 
   if (graph && graph.nodes.length === 0) {
     return <p className="empty">This upload produced no tables to graph.</p>
@@ -409,9 +404,12 @@ export function GraphView({ session, onViewRows }: Props) {
 
       <div className="graph-canvas" ref={container} />
 
+      {error && <p className="error">{error}</p>}
+
       {drill && rowGraph?.truncated && (
         <p className="hint">
-          Showing the first {DRILL_ROWS} rows of {drill.tableName}. The rest are not drawn.
+          Only part of {drill.tableName} is drawn — {rowGraph.nodes.length} rows and{' '}
+          {rowGraph.edges.length} links. The rest is left out.
         </p>
       )}
 
