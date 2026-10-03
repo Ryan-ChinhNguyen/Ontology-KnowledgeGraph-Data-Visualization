@@ -140,6 +140,32 @@ class TestRecordingWhatWasParsed:
             ("people", "orders", "FOREIGN_KEY")
         ]
 
+    async def test_the_same_link_declared_twice_is_recorded_once(
+        self, stored_job: JobMessage, parser: MagicMock
+    ) -> None:
+        """A dump can carry a key inline on the column and again as a constraint."""
+        data = parsed_people()
+        data.tables[0].relationships = [
+            Relationship("people", "orders", "FOREIGN_KEY", "id", "person_id"),
+            Relationship("people", "orders", "FOREIGN_KEY", "id", "person_id"),
+        ]
+        parser.parse.return_value = data
+
+        await process_job(stored_job, attempt=1, is_final_attempt=False)
+
+        async with session_factory() as db:
+            links = list(
+                (
+                    await db.execute(
+                        select(DatasetRelationship).where(
+                            DatasetRelationship.session_id == stored_job.session_id
+                        )
+                    )
+                ).scalars()
+            )
+        assert len(links) == 1
+        assert (links[0].from_column, links[0].to_column) == ("id", "person_id")
+
     async def test_running_again_replaces_rather_than_duplicates(
         self, stored_job: JobMessage, parser: MagicMock
     ) -> None:

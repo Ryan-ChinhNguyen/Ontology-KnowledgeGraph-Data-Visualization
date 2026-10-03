@@ -7,13 +7,16 @@ const PAGE_SIZE = 25
 
 interface Props {
   session: SessionDetail | null
+  /** Set when the graph view asks for one table's rows, so arriving here from
+   *  a node opens that table rather than whichever one sorted first. */
+  focusTableId?: string | null
 }
 
 function message(cause: unknown): string {
   return cause instanceof ApiError ? cause.message : String(cause)
 }
 
-export function TableExplorer({ session }: Props) {
+export function TableExplorer({ session, focusTableId }: Props) {
   const [tables, setTables] = useState<DatasetTable[]>([])
   const [selected, setSelected] = useState<DatasetTable | null>(null)
   const [page, setPage] = useState<RowPage | null>(null)
@@ -53,6 +56,17 @@ export function TableExplorer({ session }: Props) {
     }
   }, [sessionId, status])
 
+  // Applied separately from the fetch above because the two can arrive in
+  // either order: the tables may already be loaded when the graph asks for one.
+  useEffect(() => {
+    if (!focusTableId) return
+    const wanted = tables.find((table) => table.table_id === focusTableId)
+    if (wanted) {
+      setSelected(wanted)
+      setOffset(0)
+    }
+  }, [focusTableId, tables])
+
   useEffect(() => {
     if (!selected) {
       setPage(null)
@@ -75,20 +89,13 @@ export function TableExplorer({ session }: Props) {
   }, [selected, offset])
 
   if (!session) {
-    return (
-      <section className="panel grow">
-        <h2>Parsed data</h2>
-        <p className="empty">Pick an upload to see what it parsed into.</p>
-      </section>
-    )
+    return <p className="empty">Pick an upload to see what it parsed into.</p>
   }
 
   const pending = session.status === 'queued' || session.status === 'processing'
 
   return (
-    <section className="panel grow">
-      <h2>Parsed data</h2>
-
+    <>
       {session.status === 'failed' && (
         <p className="error">{session.error_message ?? 'This upload failed.'}</p>
       )}
@@ -170,7 +177,7 @@ export function TableExplorer({ session }: Props) {
       {!pending && session.status === 'ready' && tables.length === 0 && (
         <p className="empty">This upload produced no tables.</p>
       )}
-    </section>
+    </>
   )
 }
 

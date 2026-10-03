@@ -2,7 +2,9 @@ import type {
   DatasetTables,
   RowPage,
   SessionDetail,
+  SessionGraph,
   SessionList,
+  TableGraph,
   UploadResult,
 } from './types'
 
@@ -41,6 +43,11 @@ export const api = {
     request<void>(`/sessions/${sessionId}`, { method: 'DELETE' }),
 
   getTables: (sessionId: string) => request<DatasetTables>(`/sessions/${sessionId}/tables`),
+
+  getGraph: (sessionId: string) => request<SessionGraph>(`/sessions/${sessionId}/graph`),
+
+  getTableGraph: (tableId: string, limit: number) =>
+    request<TableGraph>(`/tables/${tableId}/graph?limit=${limit}`),
 
   getRows: (tableId: string, offset: number, limit: number) =>
     request<RowPage>(`/tables/${tableId}/rows?offset=${offset}&limit=${limit}`),

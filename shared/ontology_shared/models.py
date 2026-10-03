@@ -191,6 +191,10 @@ class DatasetRelationship(Base):
 
     Only formats that declare their own links fill this in — a SQL dump's
     foreign keys. Links for the others are proposed later, from the data.
+
+    The columns are what make the link traversable: naming the two tables says
+    they are connected, naming the columns says how. A composite key is stored
+    as one comma-joined value, because it is a single link.
     """
 
     __tablename__ = "dataset_relationships"
@@ -200,6 +204,14 @@ class DatasetRelationship(Base):
     from_table: Mapped[str] = mapped_column(String(255))
     to_table: Mapped[str] = mapped_column(String(255))
     type: Mapped[str] = mapped_column(String(64))
+    from_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    to_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: How the link reads in each direction — "belongs to" one way, "has many"
+    #: the other. Stored rather than worked out when drawing, because the
+    #: ontology stage will propose these names and they have to outlive the
+    #: request that produced them.
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    inverse_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class Job(Base):

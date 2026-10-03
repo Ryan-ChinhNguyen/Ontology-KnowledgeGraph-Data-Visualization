@@ -513,6 +513,161 @@ th.numeric {
   text-align: center;
 }
 
+/* Panel header and view switch */
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel-head h2 {
+  margin: 0;
+}
+
+.switch {
+  display: flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.switch button {
+  border: none;
+  border-radius: 0;
+  padding: 5px 14px;
+  font-size: 12px;
+}
+
+.switch button + button {
+  border-left: 1px solid var(--line);
+}
+
+.switch button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Graph */
+
+.graph {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.graph-toolbar button {
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.graph-toolbar .hint {
+  margin: 0 0 0 auto;
+}
+
+.graph-canvas {
+  height: 460px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.graph-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 14px;
+}
+
+.graph-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.graph-detail-head .hint {
+  margin: 0;
+}
+
+.graph-detail-head button {
+  margin-left: auto;
+}
+
+.graph-detail .columns,
+.graph-detail .grid {
+  margin-bottom: 0;
+}
+
+ul.neighbours {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+ul.neighbours li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+ul.neighbours .hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+.direction {
+  color: var(--accent);
+  font-weight: 700;
+  width: 14px;
+}
+
+.phrase {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+dl.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+dl.fields div {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 7px 10px;
+}
+
+dl.fields dt {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+dl.fields dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

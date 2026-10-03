@@ -14,7 +14,14 @@ import pandas as pd
 import sqlglot
 from sqlglot import expressions as exp
 
-from app.parsers.base import BaseParser, Column, NormalizedData, Relationship, Table
+from app.parsers.base import (
+    BaseParser,
+    Column,
+    NormalizedData,
+    Relationship,
+    Table,
+    foreign_key_names,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,9 +29,12 @@ DIALECT = "postgres"
 
 #: Statement types carrying no schema or row information. Skipping them also
 #: means a destructive statement is never interpreted.
-IGNORED_STATEMENTS = (exp.Drop, exp.Command, exp.Use, exp.Set, exp.Alter)
+IGNORED_STATEMENTS = (exp.Drop, exp.Command, exp.Use, exp.Set)
 
 UNKNOWN_TYPE = "unknown"
+
+#: Joins the parts of a composite foreign key into a single column reference.
+COLUMN_SEPARATOR = ","
 
 
 @dataclass
@@ -83,8 +93,29 @@ class SqlParser(BaseParser):
             state.declared_columns[table.name] = [column.name for column in table.columns]
             return
 
+        if isinstance(statement, exp.Alter):
+            self._read_alter(statement, state.foreign_keys)
+            return
+
         if isinstance(statement, exp.Insert):
             self._read_insert(statement, state)
+
+    def _read_alter(self, statement: exp.Alter, foreign_keys: list[Relationship]) -> None:
+        """Take the foreign keys out of ``ALTER TABLE ... ADD CONSTRAINT``.
+
+        This is the form ``pg_dump`` writes: the tables are created first and
+        their foreign keys added afterwards, so skipping ALTER outright would
+        lose every relationship a real dump declares. Only the constraint is
+        read — as everywhere else here, nothing is executed.
+        """
+        table = statement.this
+        if not isinstance(table, exp.Table):
+            return
+
+        for constraint in statement.find_all(exp.ForeignKey):
+            link = self._foreign_key(table.name, constraint)
+            if link is not None:
+                foreign_keys.append(link)
 
     def _read_create(self, statement: exp.Create, foreign_keys: list[Relationship]) -> Table:
         schema: exp.Schema = statement.this
@@ -94,12 +125,13 @@ class SqlParser(BaseParser):
         for definition in schema.expressions:
             if isinstance(definition, exp.ColumnDef):
                 columns.append(Column(name=definition.name, inferred_type=self._type_of(definition)))
+                inline = self._inline_foreign_key(table_name, definition)
+                if inline is not None:
+                    foreign_keys.append(inline)
             elif isinstance(definition, exp.ForeignKey):
-                target = self._foreign_key_target(definition)
-                if target:
-                    foreign_keys.append(
-                        Relationship(from_table=table_name, to_table=target, type="FOREIGN_KEY")
-                    )
+                link = self._foreign_key(table_name, definition)
+                if link is not None:
+                    foreign_keys.append(link)
 
         return Table(name=table_name, columns=columns)
 
@@ -107,12 +139,65 @@ class SqlParser(BaseParser):
         kind = definition.args.get("kind")
         return kind.sql(dialect=DIALECT) if kind else UNKNOWN_TYPE
 
-    def _foreign_key_target(self, definition: exp.ForeignKey) -> str | None:
-        reference = definition.args.get("reference")
-        if reference is None:
+    def _foreign_key(self, from_table: str, definition: exp.ForeignKey) -> Relationship | None:
+        """Read ``FOREIGN KEY (a) REFERENCES t (b)``, declared on the table."""
+        target = self._reference_target(definition.args.get("reference"))
+        if target is None:
             return None
+
+        to_table, to_column = target
+        from_column = COLUMN_SEPARATOR.join(column.name for column in definition.expressions)
+        name, inverse_name = foreign_key_names(from_column, to_table)
+        return Relationship(
+            from_table=from_table,
+            to_table=to_table,
+            type="FOREIGN_KEY",
+            from_column=from_column,
+            to_column=to_column,
+            name=name,
+            inverse_name=inverse_name,
+        )
+
+    def _inline_foreign_key(self, from_table: str, definition: exp.ColumnDef) -> Relationship | None:
+        """Read ``a INT REFERENCES t (b)``, declared on the column itself.
+
+        This form carries no ``FOREIGN KEY`` node, so it has to be found among
+        the column's constraints rather than among the table's definitions.
+        """
+        for constraint in definition.constraints:
+            target = self._reference_target(constraint.kind)
+            if target is None:
+                continue
+
+            to_table, to_column = target
+            name, inverse_name = foreign_key_names(definition.name, to_table)
+            return Relationship(
+                from_table=from_table,
+                to_table=to_table,
+                type="FOREIGN_KEY",
+                from_column=definition.name,
+                to_column=to_column,
+                name=name,
+                inverse_name=inverse_name,
+            )
+        return None
+
+    def _reference_target(self, reference: exp.Expression | None) -> tuple[str, str] | None:
+        """The table and columns a ``REFERENCES`` clause points at.
+
+        The column list is optional in SQL — ``REFERENCES t`` means the target's
+        primary key — so an empty string here is a valid answer, not a failure.
+        """
+        if not isinstance(reference, exp.Reference):
+            return None
+
         target = reference.find(exp.Table)
-        return target.name if target else None
+        if target is None:
+            return None
+
+        schema = reference.find(exp.Schema)
+        columns = [column.name for column in schema.expressions] if schema else []
+        return target.name, COLUMN_SEPARATOR.join(columns)
 
     def _read_insert(self, statement: exp.Insert, state: _ParseState) -> None:
         """Attach rows to an already-declared table.
