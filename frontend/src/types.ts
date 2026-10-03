@@ -47,6 +47,52 @@ export interface DatasetTables {
   tables: DatasetTable[]
 }
 
+export interface GraphNode {
+  table_id: string
+  name: string
+  row_count: number
+  column_count: number
+}
+
+export interface GraphEdge {
+  relationship_id: string
+  from_table_id: string
+  to_table_id: string
+  from_table: string
+  to_table: string
+  from_column: string | null
+  to_column: string | null
+  type: string
+}
+
+export interface SessionGraph {
+  session_id: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+export interface RowGraphNode {
+  id: string
+  table: string
+  label: string
+  row: Record<string, unknown>
+}
+
+export interface RowGraphEdge {
+  id: string
+  source: string
+  target: string
+  label: string
+}
+
+export interface TableGraph {
+  table_id: string
+  root_table: string
+  nodes: RowGraphNode[]
+  edges: RowGraphEdge[]
+  truncated: boolean
+}
+
 export interface RowPage {
   table_id: string
   offset: number

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, api } from './api'
+import { DatasetPanel } from './components/DatasetPanel'
 import { SessionList } from './components/SessionList'
-import { TableExplorer } from './components/TableExplorer'
 import { UploadPanel } from './components/UploadPanel'
 import type { SessionDetail, SessionSummary } from './types'
 
@@ -118,7 +118,7 @@ export default function App() {
           />
         </aside>
 
-        <TableExplorer session={detail} />
+        <DatasetPanel session={detail} />
       </main>
     </div>
   )
